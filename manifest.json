@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "offmarchy.workspace-overview",
+  "name": "Workspace Overview",
+  "version": "2.5.0",
+  "author": "Offmarchy",
+  "license": "MIT",
+  "description": "A live workspace and window thumbnail overview for Omarchy Shell.",
+  "kinds": [
+    "panel"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "panel": "Panel.qml"
+  }
+}
