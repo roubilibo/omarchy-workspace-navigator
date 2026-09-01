@@ -3,7 +3,7 @@
 Workspace navigation panel for Omarchy Shell with live Hyprland window
 thumbnails.
 
-![Workspace Navigator preview](assets/preview.png)
+![Workspace Navigator preview](preview.png)
 
 <video src="assets/demo.mp4" controls width="100%">
   <a href="assets/demo.mp4">▶ Watch the demo video</a>
@@ -55,6 +55,12 @@ Update an existing installation with:
 
 ```bash
 omarchy plugin update roubilibo.workspace-navigator
+```
+
+To remove it:
+
+```bash
+omarchy plugin remove roubilibo.workspace-navigator --yes
 ```
 
 The plugin uses compositor-backed previews only. It does not save screenshots,
