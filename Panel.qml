@@ -446,7 +446,7 @@ Item {
 
   function dismiss() {
     if (root.shell && typeof root.shell.hide === "function")
-      root.shell.hide((root.manifest && root.manifest.id) || "offmarchy.workspace-overview")
+      root.shell.hide((root.manifest && root.manifest.id) || "roubilibo.workspace-navigator")
     else
       root.close()
   }
@@ -562,7 +562,7 @@ Item {
   }
 
   IpcHandler {
-    target: "offmarchy.workspace-overview"
+    target: "roubilibo.workspace-navigator"
 
     function open(): string { root.open("{}"); return "ok" }
     function close(): string { root.close(); return "ok" }
@@ -594,7 +594,7 @@ Item {
         color: "transparent"
         exclusionMode: ExclusionMode.Ignore
 
-        WlrLayershell.namespace: "offmarchy-workspace-overview"
+        WlrLayershell.namespace: "roubilibo-workspace-navigator"
         WlrLayershell.layer: WlrLayer.Overlay
         WlrLayershell.keyboardFocus: panelWindow.visible
           ? WlrKeyboardFocus.Exclusive
