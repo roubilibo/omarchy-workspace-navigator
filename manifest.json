@@ -2,10 +2,12 @@
   "schemaVersion": 1,
   "id": "offmarchy.workspace-overview",
   "name": "Workspace Overview",
-  "version": "2.5.0",
+  "version": "2.5.1",
   "author": "Offmarchy",
   "license": "MIT",
   "description": "A live workspace and window thumbnail overview for Omarchy Shell.",
+  "homepage": "https://github.com/roubilibo/omarchy-workspace-overview",
+  "repository": "https://github.com/roubilibo/omarchy-workspace-overview",
   "kinds": [
     "panel"
   ],

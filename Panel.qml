@@ -39,6 +39,10 @@ Item {
   property bool showKeybindHint: false
 
   readonly property int minimumWorkspaceCount: 8
+  // Hyprland workspace IDs are signed integers. Keeping the accepted range
+  // explicit also means every value interpolated into a dispatcher is a
+  // canonical integer, never caller-controlled command text.
+  readonly property int maximumWorkspaceId: 2147483647
   readonly property int overviewColumns: 3
   readonly property int cardsPerPage: 9
   readonly property int cardGap: Style.space(12)
@@ -51,6 +55,14 @@ Item {
     return null
   }
 
+  function positiveWorkspaceId(value) {
+    var id = Number(value)
+    if (!isFinite(id) || Math.floor(id) !== id || id <= 0
+        || id > root.maximumWorkspaceId)
+      return -1
+    return id
+  }
+
   // Keep exactly eight default workspaces visible. Extra workspaces are shown
   // only once they exist in Hyprland or have been created through the + card.
   function workspaceIds(revision) {
@@ -58,16 +70,16 @@ Item {
     for (var i = 1; i <= root.minimumWorkspaceCount; i++) ids.push(i)
 
     for (var createdIndex = 0; createdIndex < root.createdWorkspaceIds.length; createdIndex++) {
-      var createdId = Number(root.createdWorkspaceIds[createdIndex])
-      if (isFinite(createdId) && createdId > root.minimumWorkspaceCount
+      var createdId = root.positiveWorkspaceId(root.createdWorkspaceIds[createdIndex])
+      if (createdId > root.minimumWorkspaceCount
           && ids.indexOf(createdId) === -1)
         ids.push(createdId)
     }
 
     var values = Hyprland.workspaces.values
     for (var j = 0; j < values.length; j++) {
-      var id = Number(values[j].id)
-      if (isFinite(id) && id > root.minimumWorkspaceCount && ids.indexOf(id) === -1)
+      var id = root.positiveWorkspaceId(values[j].id)
+      if (id > root.minimumWorkspaceCount && ids.indexOf(id) === -1)
         ids.push(id)
     }
 
@@ -171,15 +183,18 @@ Item {
   }
 
   function dispatchFocusWorkspace(id) {
+    var workspaceId = root.positiveWorkspaceId(id)
+    if (workspaceId < 1) return false
     if (Hyprland.usingLua)
-      Hyprland.dispatch("hl.dsp.focus({ workspace = \"" + String(id) + "\" })")
+      Hyprland.dispatch("hl.dsp.focus({ workspace = \"" + String(workspaceId) + "\" })")
     else
-      Hyprland.dispatch("workspace " + String(id))
+      Hyprland.dispatch("workspace " + String(workspaceId))
+    return true
   }
 
   function focusWorkspace(id) {
     try {
-      root.dispatchFocusWorkspace(id)
+      if (!root.dispatchFocusWorkspace(id)) return
     } catch (e) {
       console.warn("workspace overview: could not focus workspace", id, e)
     }
@@ -248,8 +263,8 @@ Item {
 
   function moveWindowToWorkspace(toplevel, workspaceId) {
     var address = root.normalizedAddress(toplevel)
-    var id = Number(workspaceId)
-    if (!address || !isFinite(id) || id <= 0) return
+    var id = root.positiveWorkspaceId(workspaceId)
+    if (!address || id < 1) return
 
     try {
       if (Hyprland.usingLua) {
@@ -268,15 +283,18 @@ Item {
   }
 
   function performWorkspaceDelete(workspaceId) {
+    var id = root.positiveWorkspaceId(workspaceId)
+    if (id < 1) return
+
     try {
       if (Hyprland.usingLua)
-        Hyprland.dispatch("hl.dsp.exec_raw(\"destroyworkspace " + String(workspaceId) + "\")")
+        Hyprland.dispatch("hl.dsp.exec_raw(\"destroyworkspace " + String(id) + "\")")
       else
-        Hyprland.dispatch("destroyworkspace " + String(workspaceId))
+        Hyprland.dispatch("destroyworkspace " + String(id))
 
       var remaining = []
       for (var i = 0; i < root.createdWorkspaceIds.length; i++) {
-        if (Number(root.createdWorkspaceIds[i]) !== workspaceId)
+        if (root.positiveWorkspaceId(root.createdWorkspaceIds[i]) !== id)
           remaining.push(root.createdWorkspaceIds[i])
       }
       root.createdWorkspaceIds = remaining
@@ -293,8 +311,8 @@ Item {
   }
 
   function deleteWorkspace(id) {
-    var workspaceId = Number(id)
-    if (!isFinite(workspaceId) || workspaceId <= root.minimumWorkspaceCount) return
+    var workspaceId = root.positiveWorkspaceId(id)
+    if (workspaceId <= root.minimumWorkspaceCount) return
 
     var workspace = root.workspaceById(workspaceId, root.workspaceRevision)
     if (root.workspaceWindowCount(workspace, root.workspaceRevision) > 0) {
@@ -305,7 +323,8 @@ Item {
     // Hyprland cannot destroy the currently active workspace. Move to the
     // first default workspace and defer the destroy until its event arrives.
     var focusedWorkspace = Hyprland.focusedWorkspace
-    if (focusedWorkspace && Number(focusedWorkspace.id) === workspaceId) {
+    if (focusedWorkspace
+        && root.positiveWorkspaceId(focusedWorkspace.id) === workspaceId) {
       try { root.dispatchFocusWorkspace(1) } catch (e) {}
       pendingWorkspaceDelete.workspaceId = workspaceId
       pendingWorkspaceDelete.attempts = 0
@@ -330,13 +349,14 @@ Item {
       }
 
       var focused = Hyprland.focusedWorkspace
-      if (focused && Number(focused.id) === workspaceId && attempts < 10) {
+      if (focused && root.positiveWorkspaceId(focused.id) === workspaceId
+          && attempts < 10) {
         attempts += 1
         restart()
         return
       }
 
-      if (focused && Number(focused.id) === workspaceId) {
+      if (focused && root.positiveWorkspaceId(focused.id) === workspaceId) {
         console.warn("workspace overview: workspace remained active; refusing to delete", workspaceId)
         workspaceId = -1
         attempts = 0
@@ -356,10 +376,10 @@ Item {
     if (sourceAddress === targetAddress) return
 
     var sourceWorkspaceId = sourceToplevel && sourceToplevel.workspace
-      ? Number(sourceToplevel.workspace.id) : -1
+      ? root.positiveWorkspaceId(sourceToplevel.workspace.id) : -1
     var targetWorkspaceId = targetToplevel && targetToplevel.workspace
-      ? Number(targetToplevel.workspace.id) : -1
-    if (!isFinite(sourceWorkspaceId) || sourceWorkspaceId <= 0
+      ? root.positiveWorkspaceId(targetToplevel.workspace.id) : -1
+    if (sourceWorkspaceId < 1
         || sourceWorkspaceId !== targetWorkspaceId) {
       console.warn("workspace overview: refusing cross-workspace window reorder",
         sourceAddress, targetAddress, sourceWorkspaceId, targetWorkspaceId)
@@ -389,9 +409,10 @@ Item {
 
   function handleWindowDrop(sourceToplevel, targetToplevel, destinationWorkspaceId) {
     var sourceWorkspaceId = sourceToplevel && sourceToplevel.workspace
-      ? Number(sourceToplevel.workspace.id) : -1
+      ? root.positiveWorkspaceId(sourceToplevel.workspace.id) : -1
     var targetWorkspaceId = targetToplevel && targetToplevel.workspace
-      ? Number(targetToplevel.workspace.id) : Number(destinationWorkspaceId)
+      ? root.positiveWorkspaceId(targetToplevel.workspace.id)
+      : root.positiveWorkspaceId(destinationWorkspaceId)
 
     if (targetToplevel && sourceWorkspaceId === targetWorkspaceId) {
       root.reorderWindowTowards(sourceToplevel, targetToplevel)
@@ -486,6 +507,13 @@ Item {
 
       var x = Number(match[1])
       var y = Number(match[2])
+      if (!isFinite(x) || !isFinite(y) || Math.floor(x) !== x
+          || Math.floor(y) !== y || Math.abs(x) > root.maximumWorkspaceId
+          || Math.abs(y) > root.maximumWorkspaceId) {
+        console.warn("workspace overview: refusing invalid cursor position",
+          cursorProbeOutput.text)
+        return
+      }
       try {
         Hyprland.dispatch("hl.dsp.window.swap({ window = \"address:" + sourceAddress
           + "\", target = \"address:" + targetAddress + "\" })")
@@ -540,8 +568,8 @@ Item {
     function close(): string { root.close(); return "ok" }
     function toggle(): string { root.toggle(); return "ok" }
     function focus(id: string): string {
-      var workspaceId = Number(id)
-      if (!isFinite(workspaceId) || workspaceId <= 0) return "invalid workspace"
+      var workspaceId = root.positiveWorkspaceId(id)
+      if (workspaceId < 1) return "invalid workspace"
       root.focusWorkspace(workspaceId)
       return "ok"
     }

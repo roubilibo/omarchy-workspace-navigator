@@ -1,42 +1,54 @@
 # Workspace Overview
 
-An Omarchy Shell/Quickshell panel inspired by `hyprtasking`.
+Workspace overview panel for Omarchy Shell with live Hyprland window
+thumbnails.
 
-It provides a deterministic numeric workspace grid with compositor-backed live
-window thumbnails. The first page contains eight default workspaces and a ninth
-`+` card. Additional workspaces are placed on horizontally scrollable 3×3 pages
-instead of growing the overview vertically. Each thumbnail is projected from
-Hyprland's actual window position and size, so the card shows the spatial layout
-inside that workspace.
-Window creation, closing, moving, resizing, and focus changes are refreshed from
-Hyprland events while the panel is open.
+![Workspace Overview preview](assets/preview.png)
 
-Interactions:
+<video src="assets/demo.mp4" controls width="100%">
+  <a href="assets/demo.mp4">▶ Watch the demo video</a>
+</video>
 
-- Clicking a thumbnail selects it inside the overview. This is an overview
-  selection, not compositor focus, so selecting an inactive window does not
-  switch workspace or move the cursor.
-- Left-drag is used only for moving or reordering windows.
-- Left-drag a thumbnail onto another card to move it silently to that workspace.
-- Left-drag a thumbnail onto another thumbnail in the same workspace to swap
-  it with the nearest tiled window in the direction of the drop.
-- Right-click a workspace card to enter that workspace.
-- Click the `+` card to create the next workspace and move to its page.
-- Added empty workspaces expose a floating `×` button for deletion.
-- Press `?` to show or hide the keyboard shortcut hint.
-- `SUPER+TAB` toggles the overview; keyboard navigation remains available.
+## Features
 
-The plugin uses Omarchy Shell's public plugin surface, Quickshell's
-`ScreencopyView`, and Hyprland IPC data. It does not replace the Hyprland
-compositor and does not write screenshot files; thumbnails are rendered from
-the compositor while the overview is visible.
+- 3×3 workspace grid with horizontal pages.
+- Live thumbnails showing each window's layout.
+- Right-click a workspace to enter it.
+- Drag windows between workspaces.
+- Drag windows within a workspace to reorder them.
+- Create and delete empty workspaces above workspace 8.
+- Keyboard navigation with arrows, `H/J/K/L`, `Tab`, and `Enter`.
 
-Limitations:
+## Install
 
-- Same-workspace reordering requires Omarchy's Hyprland Lua dispatcher. It
-  uses an explicit source and target selector, so it swaps exactly the two
-  dropped thumbnails without changing workspace or focus.
-- Grouped windows are represented by one thumbnail with tabs; dragging the
-  thumbnail moves the compositor group as one unit.
-- Workspace deletion is limited to empty workspaces created above the eight
-  default cards.
+```bash
+omarchy plugin add https://github.com/roubilibo/omarchy-workspace-overview.git --enable --yes
+```
+
+To open it with `SUPER+TAB`, add this to `~/.config/hypr/bindings.lua`:
+
+```lua
+hl.unbind("SUPER + TAB")
+o.bind("SUPER + TAB", "Workspace overview",
+  "omarchy-shell shell toggle offmarchy.workspace-overview")
+```
+
+You can also open it directly:
+
+```bash
+omarchy-shell shell toggle offmarchy.workspace-overview
+```
+
+Update an existing installation with:
+
+```bash
+omarchy plugin update offmarchy.workspace-overview
+```
+
+The plugin uses compositor-backed previews only. It does not save screenshots,
+access the network, or use privilege escalation. Omarchy plugins run as
+unsandboxed code inside `omarchy-shell`; only install repositories you trust.
+
+## License
+
+MIT

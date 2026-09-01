@@ -2,6 +2,10 @@
 
 function normalizedAddress(value) {
   var address = String(value || "").trim().toLowerCase()
+  // Hyprland client addresses are short hexadecimal identifiers. The bound
+  // prevents malformed compositor data from becoming an unbounded dispatcher
+  // argument while retaining ample room for normal 64-bit addresses.
+  if (address.length > 34) return ""
   if (!address.match(/^(0x)?[0-9a-f]+$/)) return ""
   return address.indexOf("0x") === 0 ? address : "0x" + address
 }
