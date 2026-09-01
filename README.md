@@ -1,9 +1,9 @@
-# Workspace Overview
+# Workspace Navigator
 
-Workspace overview panel for Omarchy Shell with live Hyprland window
+Workspace navigation panel for Omarchy Shell with live Hyprland window
 thumbnails.
 
-![Workspace Overview preview](assets/preview.png)
+![Workspace Navigator preview](assets/preview.png)
 
 <video src="assets/demo.mp4" controls width="100%">
   <a href="assets/demo.mp4">▶ Watch the demo video</a>
@@ -22,27 +22,39 @@ thumbnails.
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/roubilibo/omarchy-workspace-overview.git --enable --yes
+omarchy plugin add https://github.com/roubilibo/workspace-navigator.git --enable --yes
 ```
 
-To open it with `SUPER+TAB`, add this to `~/.config/hypr/bindings.lua`:
+### Bind with `SUPER+TAB`
 
-```lua
-hl.unbind("SUPER + TAB")
-o.bind("SUPER + TAB", "Workspace overview",
-  "omarchy-shell shell toggle offmarchy.workspace-overview")
-```
+1. Open the Hyprland bindings file:
 
-You can also open it directly:
+   ```bash
+   nano ~/.config/hypr/bindings.lua
+   ```
+
+2. Add the following lines. `hl.unbind` removes Omarchy's default `SUPER+TAB`
+   action before assigning the shortcut to this plugin:
+
+   ```lua
+   hl.unbind("SUPER + TAB")
+   o.bind("SUPER + TAB", "Workspace Navigator",
+     "omarchy-shell shell toggle roubilibo.workspace-navigator")
+   ```
+
+3. Save the file and press `SUPER+TAB`. Hyprland normally reloads the binding
+   automatically; if it does not, run `hyprctl reload`.
+
+The plugin can also be opened directly without a keybinding:
 
 ```bash
-omarchy-shell shell toggle offmarchy.workspace-overview
+omarchy-shell shell toggle roubilibo.workspace-navigator
 ```
 
 Update an existing installation with:
 
 ```bash
-omarchy plugin update offmarchy.workspace-overview
+omarchy plugin update roubilibo.workspace-navigator
 ```
 
 The plugin uses compositor-backed previews only. It does not save screenshots,
