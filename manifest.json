@@ -6,8 +6,8 @@
   "author": "Offmarchy",
   "license": "MIT",
   "description": "A live workspace and window thumbnail overview for Omarchy Shell.",
-  "homepage": "https://github.com/roubilibo/workspace-navigator",
-  "repository": "https://github.com/roubilibo/workspace-navigator",
+  "homepage": "https://github.com/roubilibo/omarchy-workspace-navigator",
+  "repository": "https://github.com/roubilibo/omarchy-workspace-navigator",
   "kinds": [
     "panel"
   ],

@@ -22,7 +22,7 @@ thumbnails.
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/roubilibo/workspace-navigator.git --enable --yes
+omarchy plugin add https://github.com/roubilibo/omarchy-workspace-navigator.git --enable --yes
 ```
 
 ### Bind with `SUPER+TAB`
