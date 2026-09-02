@@ -22,6 +22,14 @@ Rectangle {
   // resolver as move/swap so those thumbnails are draggable too.
   readonly property bool movable: toplevel !== null
     && WindowModel.toplevelAddress(toplevel) !== ""
+  // Cross-workspace drops belong to the workspace card. Keeping this drop
+  // area limited to same-workspace targets prevents a thumbnail from
+  // intercepting the card-level move handler.
+  readonly property bool sameWorkspace: root.draggedToplevel !== null
+    && root.draggedToplevel.workspace !== null
+    && root.toplevel.workspace !== null
+    && Number(root.draggedToplevel.workspace.id)
+      === Number(root.toplevel.workspace.id)
   readonly property bool dragging: dragProxy.dragSessionActive
   readonly property bool selected: root.selectedToplevel !== null
     && root.isSameToplevel(root.selectedToplevel, root.toplevel)
@@ -160,7 +168,7 @@ Rectangle {
     anchors.fill: parent
     z: 50
     keys: ["omarchy-window"]
-    enabled: root.draggedToplevel !== null
+    enabled: root.sameWorkspace
       && !root.isSameToplevel(root.draggedToplevel, root.toplevel)
 
     onDropped: function(drop) {

@@ -308,7 +308,9 @@ BorderSurface {
   DropArea {
     id: dropArea
     anchors.fill: parent
-    z: 20
+    // This must sit above thumbnail DropAreas for cross-workspace moves.
+    // Thumbnail drops remain enabled only for same-workspace reordering.
+    z: 60
     keys: ["omarchy-window"]
     enabled: root.validDropTarget && !root.addWorkspace
 
