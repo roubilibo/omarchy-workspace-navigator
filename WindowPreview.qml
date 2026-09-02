@@ -79,6 +79,7 @@ Rectangle {
   TextMetrics {
     id: titleMetrics
     text: root.title
+    textFormat: Text.PlainText
     font.family: Style.font.menuFamily
     font.pixelSize: Style.font.bodySmall
   }
@@ -139,6 +140,7 @@ Rectangle {
       anchors.centerIn: parent
       width: parent.width - Style.space(16)
       text: root.title
+      textFormat: Text.PlainText
       color: Util.alpha(Color.menu.text, 0.78)
       font.family: Style.font.menuFamily
       font.pixelSize: Style.font.bodySmall
@@ -222,6 +224,7 @@ Rectangle {
             anchors.leftMargin: Style.space(5)
             anchors.rightMargin: Style.space(5)
             text: tabTitle
+            textFormat: Text.PlainText
             color: Color.menu.text
             font.family: Style.font.menuFamily
             font.pixelSize: Style.font.bodySmall
@@ -253,6 +256,7 @@ Rectangle {
       anchors.leftMargin: Style.space(9)
       anchors.rightMargin: Style.space(9)
       text: root.title
+      textFormat: Text.PlainText
       color: Color.menu.text
       font.family: Style.font.menuFamily
       font.pixelSize: Style.font.bodySmall
