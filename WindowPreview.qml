@@ -79,7 +79,6 @@ Rectangle {
   TextMetrics {
     id: titleMetrics
     text: root.title
-    textFormat: Text.PlainText
     font.family: Style.font.menuFamily
     font.pixelSize: Style.font.bodySmall
   }
