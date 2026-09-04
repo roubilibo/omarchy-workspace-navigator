@@ -37,6 +37,8 @@ Rectangle {
   readonly property string title: root.titleFor(toplevel)
   readonly property string iconSource: root.iconFor(toplevel)
 
+  readonly property int maximumTitleLength: 512
+
   signal dragStarted(var toplevel)
   signal dragFinished(var toplevel)
   signal windowSelected(var toplevel)
@@ -54,10 +56,19 @@ Rectangle {
 
   function titleFor(top) {
     if (!top) return "Window"
-    if (top.title) return String(top.title)
+    var title = ""
+    if (top.title) title = String(top.title)
     var ipc = top.lastIpcObject
-    if (ipc && ipc.title) return String(ipc.title)
-    return appIdFor(top) || "Window"
+    if (!title && ipc && ipc.title) title = String(ipc.title)
+    if (!title) title = appIdFor(top) || "Window"
+
+    // Window titles are compositor-provided input. Keep control and bidi
+    // characters from affecting layout or making the displayed title
+    // misleading, and cap the amount of text used by TextMetrics/Text.
+    title = title.replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, " ")
+    if (title.length > root.maximumTitleLength)
+      title = title.slice(0, root.maximumTitleLength - 1) + "…"
+    return title
   }
 
   function iconFor(top) {

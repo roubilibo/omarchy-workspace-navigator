@@ -107,23 +107,26 @@ function workspaceTransform(monitor, screen, areaWidth, areaHeight) {
       || targetWidth <= 0 || targetHeight <= 0)
     return null
 
-  // The overview card is a fixed 3x3 cell and is intentionally allowed to
-  // have a different aspect ratio from the monitor. Independent axes keep a
-  // tiled workspace edge-to-edge instead of introducing letterbox gaps.
+  // Preserve the monitor aspect ratio inside the card. The card is usually
+  // closer to square than a 16:9 monitor, so use a uniform scale and center
+  // the workspace with letterbox margins instead of stretching it.
   var scaleX = targetWidth / usable.width
   var scaleY = targetHeight / usable.height
   if (!isFinite(scaleX) || !isFinite(scaleY) || scaleX <= 0 || scaleY <= 0) return null
+  var scale = Math.min(scaleX, scaleY)
+  var renderedWidth = usable.width * scale
+  var renderedHeight = usable.height * scale
 
   return {
-    scale: Math.min(scaleX, scaleY),
-    scaleX: scaleX,
-    scaleY: scaleY,
+    scale: scale,
+    scaleX: scale,
+    scaleY: scale,
     originX: usable.x,
     originY: usable.y,
     usableWidth: usable.width,
     usableHeight: usable.height,
-    offsetX: 0,
-    offsetY: 0,
+    offsetX: (targetWidth - renderedWidth) / 2,
+    offsetY: (targetHeight - renderedHeight) / 2,
     canvasWidth: targetWidth,
     canvasHeight: targetHeight
   }
@@ -145,20 +148,19 @@ function previewGeometry(ipcObject, monitor, screen, areaWidth, areaHeight,
     && client.x + client.width >= workspaceRight - 2
     && client.y + client.height >= workspaceBottom - 2
 
-  // A maximized/fullscreen client is meant to be the complete workspace
-  // thumbnail. Do not preserve the monitor's aspect ratio here, otherwise a
-  // 3x3 card with a slightly wider shape shows artificial side gaps.
+  // A maximized/fullscreen client is meant to cover the rendered workspace
+  // area, while the card's letterbox margins remain visible.
   if (coversWorkspace) {
     return {
       valid: true,
-      x: 0,
-      y: 0,
-      width: transform.canvasWidth,
-      height: transform.canvasHeight,
-      rawX: 0,
-      rawY: 0,
-      rawWidth: transform.canvasWidth,
-      rawHeight: transform.canvasHeight
+      x: transform.offsetX,
+      y: transform.offsetY,
+      width: transform.usableWidth * transform.scale,
+      height: transform.usableHeight * transform.scale,
+      rawX: transform.offsetX,
+      rawY: transform.offsetY,
+      rawWidth: transform.usableWidth * transform.scale,
+      rawHeight: transform.usableHeight * transform.scale
     }
   }
 

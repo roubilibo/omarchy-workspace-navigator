@@ -33,6 +33,8 @@ Item {
   property bool refreshAfterDrag: false
   property string pendingReorderSourceAddress: ""
   property string pendingReorderTargetAddress: ""
+  property int pendingWorkspaceCreateId: -1
+  property int pendingWorkspaceUnpersistId: -1
   property var createdWorkspaceIds: []
   property int currentPage: 0
   property var workspaceScroller: null
@@ -46,6 +48,40 @@ Item {
   readonly property int overviewColumns: 3
   readonly property int cardsPerPage: 9
   readonly property int cardGap: Style.space(12)
+  // Swipe behavior: "kinetic" follows momentum across multiple pages;
+  // "single-page" limits each swipe to the next or previous page.
+  property string flickBehavior: "kinetic"
+  readonly property string flickSettingsPath:
+    Quickshell.env("HOME") + "/.local/state/omarchy/settings/workspace-navigator.json"
+  readonly property string flickSettingsTempPath: flickSettingsPath + ".tmp"
+  property FileView flickSettingsFile: FileView {
+    path: root.flickSettingsPath
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.loadFlickSettings(text())
+  }
+  property FileView flickSettingsTempFile: FileView {
+    path: root.flickSettingsTempPath
+    printErrors: false
+  }
+
+  function loadFlickSettings(raw) {
+    try {
+      var settings = JSON.parse(String(raw || "{}"))
+      if (settings.flickBehavior === "single-page"
+          || settings.flickBehavior === "kinetic")
+        root.flickBehavior = settings.flickBehavior
+    } catch (e) {}
+  }
+
+  function setFlickBehavior(value) {
+    var mode = String(value) === "single-page" ? "single-page" : "kinetic"
+    root.flickBehavior = mode
+    flickSettingsTempFile.setText(JSON.stringify({ flickBehavior: mode }, null, 2) + "\n")
+    flickSettingsCommitProcess.running = true
+    return "ok"
+  }
 
   function workspaceById(id, revision) {
     var values = Hyprland.workspaces.values
@@ -147,14 +183,43 @@ Item {
     if (root.selectedIndex >= count) root.selectedIndex = 0
   }
 
-  function cardWidthFor(width) {
-    return Math.max(1, Math.floor(
-      (width - (root.overviewColumns - 1) * root.cardGap) / root.overviewColumns))
+  function cardAspectRatioFor(screen) {
+    var monitor = null
+    try { monitor = screen ? Hyprland.monitorFor(screen) : Hyprland.focusedMonitor } catch (e) {}
+    var width = monitor ? Number(monitor.width) : 0
+    var height = monitor ? Number(monitor.height) : 0
+    var reserved = monitor && (monitor.reserved
+      || (monitor.lastIpcObject ? monitor.lastIpcObject.reserved : null))
+    var left = reserved && typeof reserved.length === "number"
+      ? Number(reserved[0]) : Number(reserved && reserved.left) || 0
+    var top = reserved && typeof reserved.length === "number"
+      ? Number(reserved[1]) : Number(reserved && reserved.top) || 0
+    var right = reserved && typeof reserved.length === "number"
+      ? Number(reserved[2]) : Number(reserved && reserved.right) || 0
+    var bottom = reserved && typeof reserved.length === "number"
+      ? Number(reserved[3]) : Number(reserved && reserved.bottom) || 0
+    width -= left + right
+    height -= top + bottom
+    if (!isFinite(width) || !isFinite(height) || width <= 0 || height <= 0)
+      return 16 / 9
+    return width / height
   }
 
-  function cardHeightFor(height) {
-    return Math.max(Style.space(150), Math.floor(
-      (height - (root.overviewColumns - 1) * root.cardGap) / root.overviewColumns))
+  function cardWidthFor(width, height, aspectRatio) {
+    var availableWidth = Math.max(1,
+      (width - (root.overviewColumns - 1) * root.cardGap) / root.overviewColumns)
+    var availableHeight = Math.max(1,
+      (height - (root.overviewColumns - 1) * root.cardGap) / root.overviewColumns)
+    var aspect = isFinite(Number(aspectRatio)) && Number(aspectRatio) > 0
+      ? Number(aspectRatio) : 16 / 9
+    return Math.max(1, Math.floor(Math.min(availableWidth, availableHeight * aspect)))
+  }
+
+  function cardHeightFor(width, height, aspectRatio) {
+    var aspect = isFinite(Number(aspectRatio)) && Number(aspectRatio) > 0
+      ? Number(aspectRatio) : 16 / 9
+    var cardWidth = root.cardWidthFor(width, height, aspect)
+    return Math.max(1, Math.floor(cardWidth / aspect))
   }
 
   function select(delta) {
@@ -210,25 +275,31 @@ Item {
   }
 
   function addWorkspace() {
+    if (workspaceCreateProcess.running) return
     var ids = root.workspaceIds(root.workspaceRevision)
     var nextId = root.minimumWorkspaceCount
     for (var i = 0; i < ids.length; i++)
       nextId = Math.max(nextId, Number(ids[i]))
     nextId += 1
 
+    root.pendingWorkspaceCreateId = nextId
+    workspaceCreateProcess.running = true
+  }
+
+  function finishWorkspaceCreate(id) {
     var created = root.createdWorkspaceIds.slice(0)
-    if (created.indexOf(nextId) === -1) created.push(nextId)
+    if (created.indexOf(id) === -1) created.push(id)
     root.createdWorkspaceIds = created
     root.workspaceRevision += 1
 
     try {
       // Keep the overview open while creating the workspace so the new page
       // becomes visible immediately. The workspace is not followed here.
-      root.dispatchFocusWorkspace(nextId)
+      root.dispatchFocusWorkspace(id)
       Hyprland.refreshWorkspaces()
       Hyprland.refreshToplevels()
     } catch (e) {
-      console.warn("workspace overview: could not create workspace", nextId, e)
+      console.warn("workspace overview: could not create workspace", id, e)
     }
 
     Qt.callLater(function() {
@@ -285,29 +356,35 @@ Item {
   function performWorkspaceDelete(workspaceId) {
     var id = root.positiveWorkspaceId(workspaceId)
     if (id < 1) return
+    if (workspaceUnpersistProcess.running) return
 
+    // Hyprland's QML dispatcher sends the dispatcher directly over IPC. This
+    // avoids the non-legacy hyprctl parser and does not use raw Lua eval.
     try {
-      if (Hyprland.usingLua)
-        Hyprland.dispatch("hl.dsp.exec_raw(\"destroyworkspace " + String(id) + "\")")
-      else
-        Hyprland.dispatch("destroyworkspace " + String(id))
-
-      var remaining = []
-      for (var i = 0; i < root.createdWorkspaceIds.length; i++) {
-        if (root.positiveWorkspaceId(root.createdWorkspaceIds[i]) !== id)
-          remaining.push(root.createdWorkspaceIds[i])
-      }
-      root.createdWorkspaceIds = remaining
-      try { Hyprland.refreshWorkspaces() } catch (e) {}
-      root.workspaceRevision += 1
-      Qt.callLater(function() {
-        root.clampSelection()
-        root.scrollToPage(Math.min(root.currentPage,
-          root.pageCountFor(root.workspaceEntries(root.workspaceRevision).length) - 1))
-      })
+      Hyprland.dispatch("destroyworkspace " + String(id))
+      root.pendingWorkspaceUnpersistId = id
+      workspaceUnpersistProcess.running = true
     } catch (e) {
+      root.pendingWorkspaceUnpersistId = -1
       console.warn("workspace overview: could not delete workspace", workspaceId, e)
     }
+  }
+
+  function finishWorkspaceDelete(id) {
+    if (id < 1) return
+    var remaining = []
+    for (var i = 0; i < root.createdWorkspaceIds.length; i++) {
+      if (root.positiveWorkspaceId(root.createdWorkspaceIds[i]) !== id)
+        remaining.push(root.createdWorkspaceIds[i])
+    }
+    root.createdWorkspaceIds = remaining
+    try { Hyprland.refreshWorkspaces() } catch (e) {}
+    root.workspaceRevision += 1
+    Qt.callLater(function() {
+      root.clampSelection()
+      root.scrollToPage(Math.min(root.currentPage,
+        root.pageCountFor(root.workspaceEntries(root.workspaceRevision).length) - 1))
+    })
   }
 
   function deleteWorkspace(id) {
@@ -530,6 +607,50 @@ Item {
     }
   }
 
+  Process {
+    id: flickSettingsCommitProcess
+    command: ["mv", root.flickSettingsTempPath, root.flickSettingsPath]
+    onExited: function(exitCode) {
+      if (exitCode !== 0)
+        console.warn("workspace overview: could not save flick settings", exitCode)
+    }
+  }
+
+  Process {
+    id: workspaceCreateProcess
+    // Hyprland's non-legacy parser rejects `keyword workspace`.  Use the
+    // native workspace_rule Lua API through `hyprctl eval`; the ID is a
+    // canonical integer, so this remains a fixed, non-shell command.
+    command: ["hyprctl", "eval",
+      "hl.workspace_rule({ workspace = \"" + String(root.pendingWorkspaceCreateId)
+        + "\", persistent = true })"]
+    onExited: function(exitCode) {
+      var workspaceId = root.pendingWorkspaceCreateId
+      root.pendingWorkspaceCreateId = -1
+      if (exitCode !== 0) {
+        console.warn("workspace overview: could not make workspace persistent",
+          workspaceId, "hyprctl exited with", exitCode)
+        return
+      }
+      root.finishWorkspaceCreate(workspaceId)
+    }
+  }
+
+  Process {
+    id: workspaceUnpersistProcess
+    command: ["hyprctl", "eval",
+      "hl.workspace_rule({ workspace = \"" + String(root.pendingWorkspaceUnpersistId)
+        + "\", persistent = false })"]
+    onExited: function(exitCode) {
+      var workspaceId = root.pendingWorkspaceUnpersistId
+      root.pendingWorkspaceUnpersistId = -1
+      if (exitCode !== 0)
+        console.warn("workspace overview: could not clear workspace persistence",
+          workspaceId, "hyprctl exited with", exitCode)
+      root.finishWorkspaceDelete(workspaceId)
+    }
+  }
+
   Connections {
     target: Hyprland
     function onRawEvent(event) {
@@ -567,6 +688,9 @@ Item {
     function open(): string { root.open("{}"); return "ok" }
     function close(): string { root.close(); return "ok" }
     function toggle(): string { root.toggle(); return "ok" }
+    function setFlickBehavior(mode: string): string {
+      return root.setFlickBehavior(mode)
+    }
     function focus(id: string): string {
       var workspaceId = root.positiveWorkspaceId(id)
       if (workspaceId < 1) return "invalid workspace"
@@ -713,6 +837,8 @@ Item {
 
             Flickable {
               id: workspaceFlickable
+              property real swipeStartX: 0
+              property int swipeStartPage: 0
               Component.onCompleted: root.workspaceScroller = workspaceFlickable
               Layout.fillWidth: true
               Layout.fillHeight: true
@@ -724,10 +850,56 @@ Item {
                 root.workspaceEntries(root.workspaceRevision).length) > 1
               flickableDirection: Flickable.HorizontalFlick
               boundsBehavior: Flickable.StopAtBounds
-              onMovementEnded: root.scrollToPage(Math.round(contentX / width))
+              // Make page swipes feel snappier by increasing the travel speed
+              // and letting the flick settle sooner.
+              maximumFlickVelocity: 8000
+              flickDeceleration: 5000
+              onMovementStarted: {
+                swipeStartX = contentX
+                swipeStartPage = root.currentPage
+              }
+              onMovementEnded: {
+                if (width <= 0) return
+                var delta = contentX - swipeStartX
+                var threshold = width * 0.50
+                var targetPage = swipeStartPage
+                if (Math.abs(delta) >= threshold) {
+                  if (root.flickBehavior === "single-page") {
+                    targetPage += delta > 0 ? 1 : -1
+                  } else {
+                    // Kinetic mode keeps every page reached by a fast flick.
+                    targetPage = Math.round(contentX / width)
+                    if (targetPage === swipeStartPage)
+                      targetPage += delta > 0 ? 1 : -1
+                  }
+                } else {
+                  targetPage = Math.round(contentX / width)
+                }
+                root.scrollToPage(targetPage)
+              }
               onContentXChanged: {
+                if (root.flickBehavior === "single-page" && width > 0
+                    && (dragging || flicking)) {
+                  // Preserve native kinetic motion, but keep it inside the
+                  // adjacent-page interval for single-page mode.
+                  var startX = swipeStartPage * width
+                  var lowerBound = Math.max(0, startX - width)
+                  var upperBound = Math.min(contentWidth - width, startX + width)
+                  if (contentX < lowerBound) contentX = lowerBound
+                  else if (contentX > upperBound) contentX = upperBound
+                }
                 if (width > 0)
                   root.currentPage = Math.round(contentX / width)
+              }
+
+              Behavior on contentX {
+                // Animate only the final page snap, not pointer tracking.
+                enabled: !workspaceFlickable.dragging
+                  && !workspaceFlickable.flicking
+                NumberAnimation {
+                  duration: 180
+                  easing.type: Easing.OutCubic
+                }
               }
 
               Row {
@@ -751,12 +923,17 @@ Item {
                     width: workspaceFlickable.width
                     height: workspaceFlickable.height
 
-                    GridLayout {
-                      anchors.fill: parent
-                      columns: root.overviewColumns
-                      columnSpacing: root.cardGap
-                      rowSpacing: root.cardGap
-
+                    Item {
+                      readonly property real cardAspectRatio: root.cardAspectRatioFor(panelScreen)
+                      readonly property int cardWidth: root.cardWidthFor(
+                        workspaceFlickable.width, workspaceFlickable.height, cardAspectRatio)
+                      readonly property int cardHeight: root.cardHeightFor(
+                        workspaceFlickable.width, workspaceFlickable.height, cardAspectRatio)
+                      anchors.centerIn: parent
+                      width: cardWidth * root.overviewColumns
+                        + root.cardGap * (root.overviewColumns - 1)
+                      height: cardHeight * root.overviewColumns
+                        + root.cardGap * (root.overviewColumns - 1)
                       Repeater {
                         model: pageEntries
 
@@ -769,8 +946,15 @@ Item {
                           readonly property int absoluteIndex: pageItem.pageNumber
                             * root.cardsPerPage + index
 
-                          Layout.preferredWidth: root.cardWidthFor(workspaceFlickable.width)
-                          Layout.preferredHeight: root.cardHeightFor(workspaceFlickable.height)
+                          width: parent.cardWidth
+                          height: parent.cardHeight
+                          // Use fixed slots instead of GridLayout's implicit
+                          // column sizing, which moved the add card when a
+                          // page was only partially filled.
+                          x: (index % root.overviewColumns)
+                            * (parent.cardWidth + root.cardGap)
+                          y: Math.floor(index / root.overviewColumns)
+                            * (parent.cardHeight + root.cardGap)
                           workspaceId: addCard ? 0 : cardWorkspaceId
                           addWorkspace: addCard
                           deletable: !addCard && cardWorkspaceId > root.minimumWorkspaceCount

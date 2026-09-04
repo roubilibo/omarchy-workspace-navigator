@@ -18,6 +18,13 @@ https://github.com/user-attachments/assets/05c1dcf1-332a-4b1e-b2d7-3017d8340ca5
 - Create and delete empty workspaces above workspace 8.
 - Keyboard navigation with arrows, `H/J/K/L`, `Tab`, and `Enter`.
 
+## Swipe settings
+
+Open `Launcher → Setup → Workspace Navigator` to choose:
+
+- `Kinetic`: a strong flick can move across multiple pages.
+- `Single Page`: each flick moves only one page.
+
 ## Install
 
 ```bash

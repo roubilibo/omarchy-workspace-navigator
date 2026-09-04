@@ -166,6 +166,8 @@ BorderSurface {
           readonly property var previewIpc: modelData && modelData.lastIpcObject
             ? modelData.lastIpcObject
             : (previewToplevel ? previewToplevel.lastIpcObject : null)
+          readonly property bool previewFloating: previewIpc
+            && previewIpc.floating === true
           readonly property var targetMonitor: root.workspaceMonitor
             || (previewToplevel && previewToplevel.monitor
               ? previewToplevel.monitor : Hyprland.focusedMonitor)
@@ -184,7 +186,10 @@ BorderSurface {
           y: displayGeometry.y
           width: Math.max(1, displayGeometry.width)
           height: Math.max(1, displayGeometry.height)
-          z: index + 3
+          // Hyprland paints floating clients above tiled clients. Keep the
+          // navigator's stacking order consistent even when the IPC model
+          // lists a floating client before a fullscreen-sized tiled client.
+          z: (previewFloating ? 1000 : 0) + index + 3
           toplevel: previewToplevel
           isGroup: Boolean(modelData && modelData.isGroup)
           groupMembers: modelData && modelData.members ? modelData.members : []
