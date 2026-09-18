@@ -32,9 +32,6 @@ The setting is saved automatically. It can also be opened directly with:
 omarchy-shell roubilibo.workspace-navigator settings
 ```
 
-For compatibility with the standard application list, the plugin also creates
-`Workspace Navigator Settings` under `Omarchy Menu → Apps`.
-
 ## Install
 
 ```bash
@@ -77,12 +74,6 @@ To remove it:
 
 ```bash
 omarchy plugin remove roubilibo.workspace-navigator --yes
-```
-
-If the launcher entry should be removed as well, delete:
-
-```bash
-rm "${XDG_DATA_HOME:-$HOME/.local/share}/applications/roubilibo-workspace-navigator-settings.desktop"
 ```
 
 The plugin uses compositor-backed previews only. It does not save screenshots,

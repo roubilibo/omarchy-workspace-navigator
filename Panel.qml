@@ -68,23 +68,6 @@ Item {
   readonly property string flickSettingsPath:
     Quickshell.env("HOME") + "/.local/state/omarchy/settings/workspace-navigator.json"
   readonly property string flickSettingsTempPath: flickSettingsPath + ".tmp"
-  readonly property string launcherApplicationsDir:
-    (Quickshell.env("XDG_DATA_HOME") !== ""
-      ? Quickshell.env("XDG_DATA_HOME")
-      : Quickshell.env("HOME") + "/.local/share") + "/applications"
-  readonly property string launcherEntryPath:
-    root.launcherApplicationsDir + "/roubilibo-workspace-navigator-settings.desktop"
-  readonly property string launcherEntryText:
-    "[Desktop Entry]\n"
-    + "Type=Application\n"
-    + "Name=Workspace Navigator Settings\n"
-    + "Comment=Configure workspace navigator swipe behavior\n"
-    + "Exec=omarchy-shell roubilibo.workspace-navigator settings\n"
-    + "Icon=preferences-system\n"
-    + "Terminal=false\n"
-    + "Categories=Settings;Utility;\n"
-    + "X-Omarchy-Plugin=roubilibo.workspace-navigator\n"
-  property bool launcherRegistrationReady: false
   readonly property string launcherMenuDirectory:
     Quickshell.env("HOME") + "/.config/omarchy/extensions"
   readonly property string launcherMenuPath:
@@ -139,20 +122,6 @@ Item {
     if (option) root.setFlickBehavior(option.value)
   }
 
-  function ensureLauncherEntry(raw) {
-    if (!root.launcherRegistrationReady) return
-    var current = String(raw || "")
-    var marker = "X-Omarchy-Plugin=roubilibo.workspace-navigator"
-    if (current.indexOf(marker) !== -1) {
-      if (current !== root.launcherEntryText)
-        launcherEntryFile.setText(root.launcherEntryText)
-      return
-    }
-    // Never overwrite an unrelated desktop entry if the chosen filename was
-    // already claimed by another installation.
-    if (current.trim() === "") launcherEntryFile.setText(root.launcherEntryText)
-  }
-
   function stripLauncherMenuComments(raw) {
     return String(raw || "")
       .replace(/^\s*\/\/[^\n]*(\n|$)/gm, "")
@@ -204,7 +173,6 @@ Item {
   }
 
   Component.onCompleted: {
-    launcherDirectoryProcess.running = true
     launcherMenuDirectoryProcess.running = true
   }
 
@@ -744,30 +712,6 @@ Item {
     onExited: function(exitCode) {
       if (exitCode !== 0)
         console.warn("workspace overview: could not save flick settings", exitCode)
-    }
-  }
-
-  Process {
-    id: launcherDirectoryProcess
-    command: ["mkdir", "-p", root.launcherApplicationsDir]
-    onExited: function(exitCode) {
-      if (exitCode !== 0) {
-        console.warn("workspace overview: could not prepare launcher entry", exitCode)
-        return
-      }
-      root.launcherRegistrationReady = true
-      launcherEntryFile.reload()
-    }
-  }
-
-  FileView {
-    id: launcherEntryFile
-    path: root.launcherEntryPath
-    printErrors: false
-    onLoaded: root.ensureLauncherEntry(text())
-    onLoadFailed: {
-      if (root.launcherRegistrationReady)
-        setText(root.launcherEntryText)
     }
   }
 
