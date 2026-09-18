@@ -5,6 +5,7 @@ import Quickshell.Hyprland
 import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
+import qs.Ui
 import "WindowModel.js" as WindowModel
 
 // Omarchy Shell workspace overview.
@@ -53,6 +54,7 @@ Item {
   // Swipe behavior: "kinetic" follows momentum across multiple pages;
   // "single-page" limits each swipe to the next or previous page.
   property string flickBehavior: "kinetic"
+  property bool blurEnabled: false
   readonly property var flickBehaviorOptions: [
     {
       value: "kinetic",
@@ -67,14 +69,20 @@ Item {
   ]
   readonly property string flickSettingsPath:
     Quickshell.env("HOME") + "/.local/state/omarchy/settings/workspace-navigator.json"
-  readonly property string flickSettingsTempPath: flickSettingsPath + ".tmp"
+  readonly property string blurEvalCommand:
+    'workspaceNavigatorBlurRule = workspaceNavigatorBlurRule or '
+    + 'hl.layer_rule({ name = "workspace-navigator-blur", '
+    + 'match = { namespace = "^roubilibo-workspace-navigator$" }, blur = true }); '
+    + 'workspaceNavigatorBlurRule:set_enabled(' + (root.blurEnabled ? "true" : "false") + '); '
+    + 'hl.config({ decoration = { blur = { enabled = '
+    + (root.blurEnabled ? "true" : "false") + ' } } })'
   readonly property string launcherMenuDirectory:
     Quickshell.env("HOME") + "/.config/omarchy/extensions"
   readonly property string launcherMenuPath:
     root.launcherMenuDirectory + "/omarchy-menu.jsonc"
   readonly property string launcherMenuEntryText:
     '  "setup.workspace-navigator": {"icon":"󰒓","label":"Workspace Navigator",'
-    + '"description":"Configure workspace navigator swipe behavior",'
+    + '"description":"Configure swipe behavior and background blur",'
     + '"action":"omarchy-shell roubilibo.workspace-navigator settings"}'
   property bool launcherMenuRegistrationReady: false
   property FileView flickSettingsFile: FileView {
@@ -84,10 +92,6 @@ Item {
     onFileChanged: reload()
     onLoaded: root.loadFlickSettings(text())
   }
-  property FileView flickSettingsTempFile: FileView {
-    path: root.flickSettingsTempPath
-    printErrors: false
-  }
 
   function loadFlickSettings(raw) {
     try {
@@ -95,16 +99,36 @@ Item {
       if (settings.flickBehavior === "single-page"
           || settings.flickBehavior === "kinetic")
         root.flickBehavior = settings.flickBehavior
+      root.blurEnabled = settings.blurEnabled === true
+      root.applyBlurState()
     } catch (e) {}
+  }
+
+  function saveSettings() {
+    flickSettingsFile.setText(JSON.stringify({
+      flickBehavior: root.flickBehavior,
+      blurEnabled: root.blurEnabled
+    }, null, 2) + "\n")
   }
 
   function setFlickBehavior(value) {
     var mode = String(value) === "single-page" ? "single-page" : "kinetic"
     root.flickBehavior = mode
     root.settingsSelection = mode === "single-page" ? 1 : 0
-    flickSettingsTempFile.setText(JSON.stringify({ flickBehavior: mode }, null, 2) + "\n")
-    flickSettingsCommitProcess.running = true
+    root.saveSettings()
     return "ok"
+  }
+
+  function setBlurEnabled(value) {
+    root.blurEnabled = Boolean(value)
+    root.saveSettings()
+    root.applyBlurState()
+    return "ok"
+  }
+
+  function applyBlurState() {
+    if (blurApplyProcess.running) return
+    blurApplyProcess.running = true
   }
 
   function openSettings() {
@@ -707,11 +731,11 @@ Item {
   }
 
   Process {
-    id: flickSettingsCommitProcess
-    command: ["mv", root.flickSettingsTempPath, root.flickSettingsPath]
+    id: blurApplyProcess
+    command: ["hyprctl", "eval", root.blurEvalCommand]
     onExited: function(exitCode) {
       if (exitCode !== 0)
-        console.warn("workspace overview: could not save flick settings", exitCode)
+        console.warn("workspace overview: could not apply blur state", exitCode)
     }
   }
 
@@ -814,6 +838,10 @@ Item {
     function settings(): string { root.openSettings(); return "ok" }
     function setFlickBehavior(mode: string): string {
       return root.setFlickBehavior(mode)
+    }
+    function setBlurEnabled(value: string): string {
+      var enabled = value === "true" || value === "1" || value === "on"
+      return root.setBlurEnabled(enabled)
     }
     function focus(id: string): string {
       var workspaceId = root.positiveWorkspaceId(id)
@@ -1176,7 +1204,7 @@ Item {
 
               Text {
                 Layout.fillWidth: true
-                text: "Choose how horizontal swipes move between workspace pages."
+                text: "Choose swipe behavior and background blur."
                 color: Util.alpha(Color.menu.text, 0.70)
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
@@ -1244,6 +1272,14 @@ Item {
                     }
                   }
                 }
+              }
+
+              Toggle {
+                Layout.fillWidth: true
+                label: "Background Blur"
+                description: "Blur the desktop behind Workspace Navigator."
+                checked: root.blurEnabled
+                onClicked: root.setBlurEnabled(!root.blurEnabled)
               }
 
               Text {

@@ -25,6 +25,7 @@ After the plugin is enabled, it registers `Workspace Navigator` in
 
 - `Kinetic`: a strong flick can move across multiple pages.
 - `Single Page`: each flick moves only one page.
+- `Background Blur`: blur the desktop behind the navigator on demand.
 
 The setting is saved automatically. It can also be opened directly with:
 
