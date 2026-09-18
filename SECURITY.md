@@ -15,4 +15,6 @@ and the impact. Please allow time for a fix before public disclosure.
 This plugin runs unsandboxed inside `omarchy-shell`, as required by the
 Omarchy plugin architecture. It reads workspace/window state and intentionally
 renders live window contents. It does not make network requests, write
-screenshot files, install packages, or use privilege escalation.
+screenshot files, install packages, or use privilege escalation. When enabled,
+it creates or refreshes its own `.desktop` launcher entry under the user's XDG
+applications directory so the settings panel is available from the launcher.

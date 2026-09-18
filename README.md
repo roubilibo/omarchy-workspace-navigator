@@ -20,10 +20,17 @@ https://github.com/user-attachments/assets/05c1dcf1-332a-4b1e-b2d7-3017d8340ca5
 
 ## Swipe settings
 
-Open `Launcher → Setup → Workspace Navigator` to choose:
+After the plugin is enabled, it registers `Workspace Navigator Settings` in
+`Launcher → Apps`. Open it to choose:
 
 - `Kinetic`: a strong flick can move across multiple pages.
 - `Single Page`: each flick moves only one page.
+
+The setting is saved automatically. It can also be opened directly with:
+
+```bash
+omarchy-shell roubilibo.workspace-navigator settings
+```
 
 ## Install
 
@@ -67,6 +74,12 @@ To remove it:
 
 ```bash
 omarchy plugin remove roubilibo.workspace-navigator --yes
+```
+
+If the launcher entry should be removed as well, delete:
+
+```bash
+rm "${XDG_DATA_HOME:-$HOME/.local/share}/applications/roubilibo-workspace-navigator-settings.desktop"
 ```
 
 The plugin uses compositor-backed previews only. It does not save screenshots,

@@ -39,6 +39,8 @@ Item {
   property int currentPage: 0
   property var workspaceScroller: null
   property bool showKeybindHint: false
+  property bool settingsMode: false
+  property int settingsSelection: 0
 
   readonly property int minimumWorkspaceCount: 8
   // Hyprland workspace IDs are signed integers. Keeping the accepted range
@@ -51,9 +53,38 @@ Item {
   // Swipe behavior: "kinetic" follows momentum across multiple pages;
   // "single-page" limits each swipe to the next or previous page.
   property string flickBehavior: "kinetic"
+  readonly property var flickBehaviorOptions: [
+    {
+      value: "kinetic",
+      label: "Kinetic",
+      description: "A fast swipe can move across multiple workspace pages."
+    },
+    {
+      value: "single-page",
+      label: "Single Page",
+      description: "Each swipe moves only to the next or previous page."
+    }
+  ]
   readonly property string flickSettingsPath:
     Quickshell.env("HOME") + "/.local/state/omarchy/settings/workspace-navigator.json"
   readonly property string flickSettingsTempPath: flickSettingsPath + ".tmp"
+  readonly property string launcherApplicationsDir:
+    (Quickshell.env("XDG_DATA_HOME") !== ""
+      ? Quickshell.env("XDG_DATA_HOME")
+      : Quickshell.env("HOME") + "/.local/share") + "/applications"
+  readonly property string launcherEntryPath:
+    root.launcherApplicationsDir + "/roubilibo-workspace-navigator-settings.desktop"
+  readonly property string launcherEntryText:
+    "[Desktop Entry]\n"
+    + "Type=Application\n"
+    + "Name=Workspace Navigator Settings\n"
+    + "Comment=Configure workspace navigator swipe behavior\n"
+    + "Exec=omarchy-shell roubilibo.workspace-navigator settings\n"
+    + "Icon=preferences-system\n"
+    + "Terminal=false\n"
+    + "Categories=Settings;Utility;\n"
+    + "X-Omarchy-Plugin=roubilibo.workspace-navigator\n"
+  property bool launcherRegistrationReady: false
   property FileView flickSettingsFile: FileView {
     path: root.flickSettingsPath
     watchChanges: true
@@ -78,9 +109,39 @@ Item {
   function setFlickBehavior(value) {
     var mode = String(value) === "single-page" ? "single-page" : "kinetic"
     root.flickBehavior = mode
+    root.settingsSelection = mode === "single-page" ? 1 : 0
     flickSettingsTempFile.setText(JSON.stringify({ flickBehavior: mode }, null, 2) + "\n")
     flickSettingsCommitProcess.running = true
     return "ok"
+  }
+
+  function openSettings() {
+    root.open('{"mode":"settings"}')
+  }
+
+  function selectSettings(delta) {
+    var count = root.flickBehaviorOptions.length
+    if (count <= 0) return
+    root.settingsSelection = (root.settingsSelection + delta + count) % count
+  }
+
+  function activateSettingsSelection() {
+    var option = root.flickBehaviorOptions[root.settingsSelection]
+    if (option) root.setFlickBehavior(option.value)
+  }
+
+  function ensureLauncherEntry(raw) {
+    if (!root.launcherRegistrationReady) return
+    var current = String(raw || "")
+    var marker = "X-Omarchy-Plugin=roubilibo.workspace-navigator"
+    if (current.indexOf(marker) !== -1) {
+      if (current !== root.launcherEntryText)
+        launcherEntryFile.setText(root.launcherEntryText)
+      return
+    }
+    // Never overwrite an unrelated desktop entry if the chosen filename was
+    // already claimed by another installation.
+    if (current.trim() === "") launcherEntryFile.setText(root.launcherEntryText)
   }
 
   function workspaceById(id, revision) {
@@ -499,6 +560,11 @@ Item {
   }
 
   function open(payloadJson) {
+    var payload = ({})
+    try { payload = JSON.parse(String(payloadJson || "{}")) } catch (e) {}
+    root.settingsMode = payload.mode === "settings"
+    if (root.settingsMode)
+      root.settingsSelection = root.flickBehavior === "single-page" ? 1 : 0
     try { Hyprland.refreshWorkspaces(); Hyprland.refreshToplevels() } catch (e) {}
     root.workspaceRevision += 1
     root.selectedToplevel = null
@@ -514,6 +580,7 @@ Item {
 
   function close() {
     root.opened = false
+    root.settingsMode = false
     root.showKeybindHint = false
   }
 
@@ -617,6 +684,30 @@ Item {
   }
 
   Process {
+    id: launcherDirectoryProcess
+    command: ["mkdir", "-p", root.launcherApplicationsDir]
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        console.warn("workspace overview: could not prepare launcher entry", exitCode)
+        return
+      }
+      root.launcherRegistrationReady = true
+      launcherEntryFile.reload()
+    }
+  }
+
+  FileView {
+    id: launcherEntryFile
+    path: root.launcherEntryPath
+    printErrors: false
+    onLoaded: root.ensureLauncherEntry(text())
+    onLoadFailed: {
+      if (root.launcherRegistrationReady)
+        setText(root.launcherEntryText)
+    }
+  }
+
+  Process {
     id: workspaceCreateProcess
     // Hyprland's non-legacy parser rejects `keyword workspace`.  Use the
     // native workspace_rule Lua API through `hyprctl eval`; the ID is a
@@ -688,6 +779,7 @@ Item {
     function open(): string { root.open("{}"); return "ok" }
     function close(): string { root.close(); return "ok" }
     function toggle(): string { root.toggle(); return "ok" }
+    function settings(): string { root.openSettings(); return "ok" }
     function setFlickBehavior(mode: string): string {
       return root.setFlickBehavior(mode)
     }
@@ -755,6 +847,18 @@ Item {
             if (event.key === Qt.Key_Escape) {
               root.dismiss()
               event.accepted = true
+            } else if (root.settingsMode) {
+              if (event.key === Qt.Key_Up || event.key === Qt.Key_K) {
+                root.selectSettings(-1)
+                event.accepted = true
+              } else if (event.key === Qt.Key_Down || event.key === Qt.Key_J) {
+                root.selectSettings(1)
+                event.accepted = true
+              } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter
+                         || event.key === Qt.Key_Space) {
+                root.activateSettingsSelection()
+                event.accepted = true
+              }
             } else if (event.text === "?" || event.key === Qt.Key_Question
                        || event.key === Qt.Key_Slash) {
               root.toggleKeybindHint()
@@ -783,6 +887,7 @@ Item {
 
           ColumnLayout {
             id: overviewColumn
+            visible: !root.settingsMode
             anchors.centerIn: parent
             width: parent.width - Style.space(48)
             height: parent.height - Style.space(48)
@@ -1007,6 +1112,138 @@ Item {
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
               horizontalAlignment: Text.AlignHCenter
+            }
+          }
+
+          Rectangle {
+            visible: root.settingsMode
+            z: 10
+            anchors.centerIn: parent
+            width: Math.min(parent.width - Style.space(48), Style.space(560))
+            height: settingsColumn.implicitHeight + Style.space(48)
+            radius: Style.cornerRadius
+            color: Color.menu.background
+            border.width: 1
+            border.color: Util.alpha(Color.menu.border, 0.35)
+
+            ColumnLayout {
+              id: settingsColumn
+              anchors.fill: parent
+              anchors.margins: Style.space(24)
+              spacing: Style.space(12)
+
+              Text {
+                Layout.fillWidth: true
+                text: "Workspace Navigator Settings"
+                color: Color.menu.text
+                font.family: Style.font.family
+                font.pixelSize: Style.font.title
+                font.bold: true
+                horizontalAlignment: Text.AlignHCenter
+              }
+
+              Text {
+                Layout.fillWidth: true
+                text: "Choose how horizontal swipes move between workspace pages."
+                color: Util.alpha(Color.menu.text, 0.70)
+                font.family: Style.font.family
+                font.pixelSize: Style.font.bodySmall
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.WordWrap
+              }
+
+              Repeater {
+                model: root.flickBehaviorOptions
+
+                delegate: Rectangle {
+                  required property var modelData
+                  required property int index
+                  Layout.fillWidth: true
+                  implicitHeight: Style.space(70)
+                  radius: Style.cornerRadius
+                  color: index === root.settingsSelection
+                    ? Util.alpha(Color.accent, 0.20)
+                    : Util.alpha(Color.menu.text, 0.05)
+                  border.width: index === root.settingsSelection ? 2 : 1
+                  border.color: index === root.settingsSelection
+                    ? Color.accent : Util.alpha(Color.menu.border, 0.26)
+
+                  RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: Style.space(16)
+                    anchors.rightMargin: Style.space(16)
+                    spacing: Style.space(12)
+
+                    Text {
+                      text: index === root.settingsSelection ? "●" : "○"
+                      color: index === root.settingsSelection
+                        ? Color.accent : Util.alpha(Color.menu.text, 0.56)
+                      font.pixelSize: Style.font.title
+                    }
+
+                    ColumnLayout {
+                      Layout.fillWidth: true
+                      spacing: Style.space(2)
+
+                      Text {
+                        Layout.fillWidth: true
+                        text: modelData.label
+                        color: Color.menu.text
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.body
+                        font.bold: true
+                      }
+
+                      Text {
+                        Layout.fillWidth: true
+                        text: modelData.description
+                        color: Util.alpha(Color.menu.text, 0.66)
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.bodySmall
+                        wrapMode: Text.WordWrap
+                      }
+                    }
+                  }
+
+                  TapHandler {
+                    onTapped: {
+                      root.settingsSelection = index
+                      root.setFlickBehavior(modelData.value)
+                    }
+                  }
+                }
+              }
+
+              Text {
+                Layout.fillWidth: true
+                text: "Changes are saved automatically. Press Esc to close."
+                color: Util.alpha(Color.menu.text, 0.52)
+                font.family: Style.font.family
+                font.pixelSize: Style.font.bodySmall
+                horizontalAlignment: Text.AlignHCenter
+              }
+
+              Rectangle {
+                Layout.alignment: Qt.AlignHCenter
+                implicitWidth: Style.space(110)
+                implicitHeight: Style.space(36)
+                radius: height / 2
+                color: Util.alpha(Color.accent, 0.22)
+                border.width: 1
+                border.color: Util.alpha(Color.accent, 0.70)
+
+                Text {
+                  anchors.fill: parent
+                  text: "Close"
+                  color: Color.menu.text
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.bodySmall
+                  horizontalAlignment: Text.AlignHCenter
+                  verticalAlignment: Text.AlignVCenter
+                }
+
+                TapHandler { onTapped: root.dismiss() }
+              }
             }
           }
         }
