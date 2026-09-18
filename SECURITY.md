@@ -17,4 +17,5 @@ Omarchy plugin architecture. It reads workspace/window state and intentionally
 renders live window contents. It does not make network requests, write
 screenshot files, install packages, or use privilege escalation. When enabled,
 it creates or refreshes its own `.desktop` launcher entry under the user's XDG
-applications directory so the settings panel is available from the launcher.
+applications directory and adds its own menu item to the user's Omarchy menu
+extension so the settings panel is available from the launcher.

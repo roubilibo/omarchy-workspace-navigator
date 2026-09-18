@@ -85,6 +85,15 @@ Item {
     + "Categories=Settings;Utility;\n"
     + "X-Omarchy-Plugin=roubilibo.workspace-navigator\n"
   property bool launcherRegistrationReady: false
+  readonly property string launcherMenuDirectory:
+    Quickshell.env("HOME") + "/.config/omarchy/extensions"
+  readonly property string launcherMenuPath:
+    root.launcherMenuDirectory + "/omarchy-menu.jsonc"
+  readonly property string launcherMenuEntryText:
+    '  "setup.workspace-navigator": {"icon":"󰒓","label":"Workspace Navigator",'
+    + '"description":"Configure workspace navigator swipe behavior",'
+    + '"action":"omarchy-shell roubilibo.workspace-navigator settings"}'
+  property bool launcherMenuRegistrationReady: false
   property FileView flickSettingsFile: FileView {
     path: root.flickSettingsPath
     watchChanges: true
@@ -142,6 +151,61 @@ Item {
     // Never overwrite an unrelated desktop entry if the chosen filename was
     // already claimed by another installation.
     if (current.trim() === "") launcherEntryFile.setText(root.launcherEntryText)
+  }
+
+  function stripLauncherMenuComments(raw) {
+    return String(raw || "")
+      .replace(/^\s*\/\/[^\n]*(\n|$)/gm, "")
+      .replace(/,(\s*[}\]])/g, "$1")
+  }
+
+  function ensureLauncherMenuEntry(raw) {
+    if (!root.launcherMenuRegistrationReady) return
+    var current = String(raw || "")
+    if (/^\s*"setup\.workspace-navigator"\s*:/m.test(current)) return
+
+    if (current.trim() === "") {
+      launcherMenuFile.setText("{\n" + root.launcherMenuEntryText + "\n}\n")
+      return
+    }
+
+    var parsed = null
+    try { parsed = JSON.parse(root.stripLauncherMenuComments(current)) } catch (e) {
+      console.warn("workspace overview: could not parse omarchy menu extension", e)
+      return
+    }
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object"
+        || parsed.items !== undefined) {
+      console.warn("workspace overview: unsupported omarchy menu extension format")
+      return
+    }
+
+    var closingBrace = current.lastIndexOf("}")
+    if (closingBrace < 0) {
+      console.warn("workspace overview: omarchy menu extension has no closing brace")
+      return
+    }
+
+    var lines = current.split("\n")
+    var closingLine = current.slice(0, closingBrace).split("\n").length - 1
+    var priorLine = closingLine - 1
+    while (priorLine >= 0
+           && (lines[priorLine].trim() === ""
+               || lines[priorLine].trim().indexOf("//") === 0))
+      priorLine -= 1
+
+    if (Object.keys(parsed).length > 0 && priorLine >= 0
+        && lines[priorLine].trim() !== "{"
+        && !lines[priorLine].trim().endsWith(","))
+      lines[priorLine] += ","
+
+    lines.splice(closingLine, 0, root.launcherMenuEntryText)
+    launcherMenuFile.setText(lines.join("\n"))
+  }
+
+  Component.onCompleted: {
+    launcherDirectoryProcess.running = true
+    launcherMenuDirectoryProcess.running = true
   }
 
   function workspaceById(id, revision) {
@@ -704,6 +768,30 @@ Item {
     onLoadFailed: {
       if (root.launcherRegistrationReady)
         setText(root.launcherEntryText)
+    }
+  }
+
+  Process {
+    id: launcherMenuDirectoryProcess
+    command: ["mkdir", "-p", root.launcherMenuDirectory]
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        console.warn("workspace overview: could not prepare omarchy menu extension", exitCode)
+        return
+      }
+      root.launcherMenuRegistrationReady = true
+      launcherMenuFile.reload()
+    }
+  }
+
+  FileView {
+    id: launcherMenuFile
+    path: root.launcherMenuPath
+    printErrors: false
+    onLoaded: root.ensureLauncherMenuEntry(text())
+    onLoadFailed: {
+      if (root.launcherMenuRegistrationReady)
+        setText("{\n" + root.launcherMenuEntryText + "\n}\n")
     }
   }
 

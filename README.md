@@ -20,8 +20,8 @@ https://github.com/user-attachments/assets/05c1dcf1-332a-4b1e-b2d7-3017d8340ca5
 
 ## Swipe settings
 
-After the plugin is enabled, it registers `Workspace Navigator Settings` in
-`Launcher → Apps`. Open it to choose:
+After the plugin is enabled, it registers `Workspace Navigator` in
+`Omarchy Menu → Setup`. Open it to choose:
 
 - `Kinetic`: a strong flick can move across multiple pages.
 - `Single Page`: each flick moves only one page.
@@ -31,6 +31,9 @@ The setting is saved automatically. It can also be opened directly with:
 ```bash
 omarchy-shell roubilibo.workspace-navigator settings
 ```
+
+For compatibility with the standard application list, the plugin also creates
+`Workspace Navigator Settings` under `Omarchy Menu → Apps`.
 
 ## Install
 
