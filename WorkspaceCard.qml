@@ -360,4 +360,18 @@ BorderSurface {
       root.windowDropped(drop.source.toplevel)
     }
   }
+
+  // Window previews can reach the card edges in a no-gaps workspace and are
+  // stacked above BorderSurface's native border. Redraw the focused outline
+  // last so thumbnails cannot cover its top (or other) edges.
+  Rectangle {
+    anchors.fill: parent
+    z: 100000
+    visible: root.focused
+    color: "transparent"
+    radius: root.radius
+    border.color: Color.accent
+    border.width: root.activeBorderWidth
+    antialiasing: true
+  }
 }

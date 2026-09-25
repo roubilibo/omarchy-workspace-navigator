@@ -50,6 +50,7 @@ Item {
   property bool settingsMode: false
   property int settingsSelection: 0
   property bool altTabOpen: false
+  property bool modalInputModeActive: false
   property int altTabIndex: -1
   property var altTabCandidates: []
   // The candidates are a snapshot of the MRU order for one Alt+Tab session.
@@ -64,8 +65,10 @@ Item {
   property var altTabPreviewRepeater: null
 
   onAltTabOpenChanged: {
+    root.syncModalInputMode()
     if (root.altTabOpen) Qt.callLater(root.ensureAltTabSelectionVisible)
   }
+  onOpenedChanged: root.syncModalInputMode()
   onAltTabIndexChanged: {
     if (root.altTabOpen) Qt.callLater(root.ensureAltTabSelectionVisible)
   }
@@ -78,10 +81,21 @@ Item {
   readonly property int overviewColumns: 3
   readonly property int cardsPerPage: 9
   readonly property int cardGap: Style.space(12)
+  // Keep the sampling radius modest and spend more passes on a smoother
+  // result; a large radius with too few passes can expose blocky artifacts.
+  readonly property int micaBlurSize: 6
+  readonly property int micaBlurPasses: 4
   // Swipe behavior defaults to one page at a time. Kinetic is an optional
   // enhancement exposed by the single "Kinetic Swipe" toggle.
   property string flickBehavior: "single-page"
   property bool blurEnabled: false
+  property bool blurBaseEnabled: true
+  property int blurBaseSize: 8
+  property int blurBasePasses: 1
+  property bool blurBaseStateKnown: false
+  property bool blurApplyPending: false
+  readonly property bool blurRequested: root.blurEnabled && root.opened
+    && !root.settingsMode && !root.altTabOpen
   readonly property var settingsOptions: [
     {
       kind: "flick",
@@ -96,7 +110,7 @@ Item {
     {
       kind: "blur",
       label: "Overview Background Blur",
-      description: "Blur the desktop behind the workspace overview."
+      description: "Use a softly blurred, theme-tinted Mica-like backdrop."
     }
   ]
   readonly property string flickSettingsPath:
@@ -106,11 +120,14 @@ Item {
     + 'hl.layer_rule({ name = "workspace-navigator-blur", '
     + 'match = { namespace = "^roubilibo-workspace-navigator$" }, blur = true }); '
     + 'workspaceNavigatorBlurRule:set_enabled('
-    + (root.blurEnabled && root.opened && !root.settingsMode && !root.altTabOpen
-      ? "true" : "false") + '); '
+    + (root.blurRequested ? "true" : "false") + '); '
     + 'hl.config({ decoration = { blur = { enabled = '
-    + (root.blurEnabled && root.opened && !root.settingsMode && !root.altTabOpen
-      ? "true" : "false") + ' } } })'
+    + (root.blurRequested || root.blurBaseEnabled ? "true" : "false")
+    + ', size = ' + String(root.blurRequested
+      ? root.micaBlurSize : root.blurBaseSize)
+    + ', passes = ' + String(root.blurRequested
+      ? root.micaBlurPasses : root.blurBasePasses)
+    + ' } } })'
   readonly property string launcherMenuDirectory:
     Quickshell.env("HOME") + "/.config/omarchy/extensions"
   readonly property string launcherMenuPath:
@@ -173,7 +190,16 @@ Item {
   }
 
   function applyBlurState() {
-    if (blurApplyProcess.running) return
+    if (!root.blurBaseStateKnown) {
+      root.blurApplyPending = true
+      if (!blurBaseProbe.running) blurBaseProbe.running = true
+      return
+    }
+    if (blurApplyProcess.running) {
+      root.blurApplyPending = true
+      return
+    }
+    root.blurApplyPending = false
     blurApplyProcess.running = true
   }
 
@@ -258,6 +284,7 @@ Item {
   Component.onCompleted: {
     launcherMenuDirectoryProcess.running = true
     root.rememberAltTabFocus(Hyprland.activeToplevel)
+    root.applyBlurState()
   }
 
   function workspaceById(id, revision) {
@@ -1141,6 +1168,22 @@ Item {
     root.applyBlurState()
   }
 
+  function syncModalInputMode() {
+    var shouldBeActive = root.opened || root.altTabOpen
+    if (shouldBeActive === root.modalInputModeActive) return
+    if (!Hyprland.usingLua) {
+      console.warn("workspace navigator: modal input requires Hyprland Lua")
+      return
+    }
+    try {
+      Hyprland.dispatch("workspaceNavigatorSetModal("
+        + (shouldBeActive ? "true" : "false") + ")")
+      root.modalInputModeActive = shouldBeActive
+    } catch (e) {
+      console.warn("workspace navigator: could not change modal input mode", e)
+    }
+  }
+
   function toggleKeybindHint() {
     root.showKeybindHint = !root.showKeybindHint
   }
@@ -1245,6 +1288,44 @@ Item {
     onExited: function(exitCode) {
       if (exitCode !== 0)
         console.warn("workspace overview: could not apply blur state", exitCode)
+      if (root.blurApplyPending) root.applyBlurState()
+    }
+  }
+
+  Process {
+    id: blurBaseProbe
+    command: ["sh", "-c",
+      "set -e; hyprctl -j getoption decoration:blur:enabled; "
+        + "hyprctl -j getoption decoration:blur:size; "
+        + "hyprctl -j getoption decoration:blur:passes"]
+    stdout: StdioCollector {
+      id: blurBaseProbeOutput
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      var options = String(blurBaseProbeOutput.text || "").trim().split(/\r?\n/)
+      try {
+        if (exitCode !== 0 || options.length !== 3)
+          throw new Error("incomplete Hyprland blur options")
+        var enabled = JSON.parse(options[0])
+        var size = JSON.parse(options[1])
+        var passes = JSON.parse(options[2])
+        if (typeof enabled.bool !== "boolean"
+            || !isFinite(Number(size.int)) || !isFinite(Number(passes.int)))
+          throw new Error("invalid Hyprland blur options")
+        root.blurBaseEnabled = enabled.bool
+        root.blurBaseSize = Number(size.int)
+        root.blurBasePasses = Number(passes.int)
+      } catch (e) {
+        // Do not overwrite compositor-wide blur settings if we failed to
+        // capture their original values.
+        console.warn("workspace overview: could not read existing blur options", e)
+        root.blurBaseStateKnown = false
+        root.blurApplyPending = false
+        return
+      }
+      root.blurBaseStateKnown = true
+      if (root.blurApplyPending) root.applyBlurState()
     }
   }
 
@@ -1421,7 +1502,9 @@ Item {
         Rectangle {
           anchors.fill: parent
           visible: root.opened && !root.settingsMode && !root.altTabOpen
-          color: Util.alpha(Color.background, 0.92)
+          // Mica-like material: a soft theme-tinted veil over a broad backdrop
+          // blur, rather than the near-opaque flat scrim used previously.
+          color: Util.alpha(Color.background, root.blurEnabled ? 0.78 : 0.92)
 
           MouseArea {
             anchors.fill: parent
@@ -1452,6 +1535,16 @@ Item {
               if (root.workspaceContextOpen) root.closeWorkspaceContext()
               else if (root.altTabOpen) root.altTabCancel()
               else root.dismiss()
+              event.accepted = true
+            } else if (event.key === Qt.Key_Tab
+                       && (event.modifiers & Qt.MetaModifier)) {
+              if (root.altTabOpen) root.altTabCancel()
+              if (root.opened || !root.altTabOpen) root.dismiss()
+              event.accepted = true
+            } else if (root.opened && !root.altTabOpen
+                       && event.key === Qt.Key_Tab
+                       && (event.modifiers & Qt.AltModifier)) {
+              root.altTabStep(Boolean(event.modifiers & Qt.ShiftModifier))
               event.accepted = true
             } else if (root.altTabOpen) {
               if (event.key === Qt.Key_Left || event.key === Qt.Key_H
@@ -1558,8 +1651,8 @@ Item {
               visible: root.showKeybindHint
               Layout.fillWidth: true
               Layout.minimumHeight: 0
-              Layout.preferredHeight: visible ? Style.space(58) : 0
-              Layout.maximumHeight: visible ? Style.space(58) : 0
+              Layout.preferredHeight: visible ? Style.space(82) : 0
+              Layout.maximumHeight: visible ? Style.space(82) : 0
               radius: Style.cornerRadius
               color: Util.alpha(Color.menu.background, 0.82)
               border.width: 1
@@ -1569,7 +1662,7 @@ Item {
                 anchors.fill: parent
                 anchors.leftMargin: Style.space(14)
                 anchors.rightMargin: Style.space(14)
-                text: "Keyboard shortcuts  •  Esc: close  •  ←/→ or H/L: navigate  •  ↑/↓ or K/J: move  •  Tab/Shift+Tab: select  •  Enter/Space: activate  •  ?: toggle hints"
+                text: "Overview: ←/→ or H/L navigate  •  ↑/↓ or K/J move rows  •  Tab/Shift+Tab select  •  Enter/Space activate  •  Esc close  •  ?: hints\nSUPER+TAB: toggle overview  •  ALT+TAB: next window  •  ALT+SHIFT+TAB: previous  •  release ALT: focus selected"
                 color: Util.alpha(Color.menu.text, 0.82)
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
@@ -1622,7 +1715,10 @@ Item {
                 if (Math.abs(horizontalWheelAccumulator) < threshold)
                   return
 
-                var direction = horizontalWheelAccumulator > 0 ? 1 : -1
+                // Qt's horizontal wheel delta describes content scrolling,
+                // which is opposite to the physical finger direction. Match
+                // Flickable's direct-drag behavior: swipe left advances pages.
+                var direction = horizontalWheelAccumulator > 0 ? -1 : 1
                 horizontalWheelAccumulator = 0
                 root.scrollToPage(root.currentPage + direction)
                 event.accepted = true
@@ -1796,10 +1892,10 @@ Item {
             Text {
               Layout.fillWidth: true
               text: root.pageCountFor(root.workspaceEntries(root.workspaceRevision).length) > 1
-                ? "← swipe for previous page    page "
+                ? "Swipe left for next page    •    page "
                   + String(root.currentPage + 1) + "/"
                   + String(root.pageCountFor(root.workspaceEntries(root.workspaceRevision).length))
-                  + "    swipe right for next page →    ?: show/hide shortcuts"
+                  + "    •    swipe right for previous page    •    ?: show/hide shortcuts"
                 : "Click card: enter    Click thumbnail: focus    Left-drag: move/swap    Right-click: actions    ?: shortcuts"
               color: Util.alpha(Color.foreground, 0.50)
               font.family: Style.font.family
