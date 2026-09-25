@@ -11,7 +11,9 @@ BorderSurface {
 
   required property int workspaceId
   property var workspace: null
+  property string workspaceName: ""
   property var previewScreen: null
+  property Item contextTarget: null
   property bool focused: false
   property bool addWorkspace: false
   property bool deletable: false
@@ -63,12 +65,14 @@ BorderSurface {
   }
 
   signal workspaceActivated()
+  signal workspaceContextRequested(real x, real y)
   signal workspaceHovered()
   signal addWorkspaceRequested()
   signal workspaceDeleteRequested()
   signal windowDragStarted(var toplevel)
   signal windowDragFinished(var toplevel)
   signal windowSelected(var toplevel)
+  signal windowActivated(var toplevel)
   signal windowDropped(var toplevel)
   signal windowDroppedOn(var sourceToplevel, var targetToplevel)
 
@@ -89,25 +93,33 @@ BorderSurface {
   borderSpec: root.cardBorderSpec
   clip: true
 
-  // Workspace entry is intentionally right-click only. Left-drag belongs to
-  // the window thumbnails; left-clicking an empty area is a no-op.
+  // Left-clicking the card enters the workspace. Window thumbnails sit above
+  // this area and own their own left-click/drag behavior; right-click opens
+  // the workspace action menu.
   MouseArea {
     anchors.fill: parent
     z: 1
     acceptedButtons: root.addWorkspace
-      ? (Qt.LeftButton | Qt.RightButton) : Qt.RightButton
+      ? (Qt.LeftButton | Qt.RightButton) : (Qt.LeftButton | Qt.RightButton)
     hoverEnabled: true
     cursorShape: Qt.PointingHandCursor
     onEntered: root.workspaceHovered()
-    onClicked: {
-      if (root.addWorkspace) root.addWorkspaceRequested()
-      else root.workspaceActivated()
+    onClicked: function(mouse) {
+      if (mouse.button === Qt.RightButton && !root.addWorkspace) {
+        var point = root.contextTarget
+          ? root.mapToItem(root.contextTarget, mouse.x, mouse.y)
+          : ({ x: mouse.x, y: mouse.y })
+        root.workspaceContextRequested(point.x, point.y)
+      } else if (root.addWorkspace) {
+        root.addWorkspaceRequested()
+      } else {
+        root.workspaceActivated()
+      }
     }
   }
 
-  // An empty card must consume left clicks locally. Otherwise the click
-  // bubbles to the overview scrim, which dismisses the panel and leaves the
-  // compositor on the previously active workspace.
+  // An empty card must consume left clicks locally so the click enters the
+  // empty workspace instead of bubbling to the overview scrim.
   MouseArea {
     anchors.fill: parent
     z: 15
@@ -116,7 +128,10 @@ BorderSurface {
     hoverEnabled: true
     cursorShape: Qt.ArrowCursor
     onEntered: root.workspaceHovered()
-    onClicked: function(mouse) { mouse.accepted = true }
+    onClicked: function(mouse) {
+      if (mouse.button === Qt.LeftButton) root.workspaceActivated()
+      else mouse.accepted = true
+    }
   }
 
   Rectangle {
@@ -127,6 +142,22 @@ BorderSurface {
       : (root.validDropTarget || root.keyboardSelected
         ? Style.hoverFillFor(Color.menu.text, Color.accent) : "transparent")
     Behavior on color { ColorAnimation { duration: 80 } }
+  }
+
+  Text {
+    visible: !root.addWorkspace && root.workspaceName !== ""
+    z: 50
+    anchors.left: badge.right
+    anchors.leftMargin: Style.space(8)
+    anchors.top: parent.top
+    anchors.topMargin: Style.space(11)
+    width: Math.max(1, root.width - badge.width - Style.space(46))
+    text: root.workspaceName
+    color: root.focused ? Color.menu.text : Util.alpha(Color.menu.text, 0.82)
+    font.family: Style.font.menuFamily
+    font.pixelSize: Style.font.bodySmall
+    font.bold: root.focused
+    elide: Text.ElideRight
   }
 
   Item {
@@ -199,6 +230,7 @@ BorderSurface {
           onDragStarted: root.windowDragStarted(previewToplevel)
           onDragFinished: root.windowDragFinished(previewToplevel)
           onWindowSelected: root.windowSelected(previewToplevel)
+          onWindowActivated: root.windowActivated(previewToplevel)
           onWindowDroppedOn: function(sourceToplevel, targetToplevel) {
             root.windowDroppedOn(sourceToplevel, targetToplevel)
           }

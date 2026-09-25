@@ -42,6 +42,7 @@ Rectangle {
   signal dragStarted(var toplevel)
   signal dragFinished(var toplevel)
   signal windowSelected(var toplevel)
+  signal windowActivated(var toplevel)
   signal windowDroppedOn(var sourceToplevel, var targetToplevel)
 
   function appIdFor(top) {
@@ -286,7 +287,10 @@ Rectangle {
   // would switch workspaces and is the source of cursor warps.
   TapHandler {
     acceptedButtons: Qt.LeftButton
-    onTapped: root.windowSelected(root.toplevel)
+    onTapped: {
+      root.windowSelected(root.toplevel)
+      root.windowActivated(root.toplevel)
+    }
   }
 
   DragHandler {

@@ -23,6 +23,12 @@ Item {
   // Selection belongs to the overview only. Do not focus the real compositor
   // window here: focusing it can switch workspaces and warp the cursor.
   property var selectedToplevel: null
+  property int contextWorkspaceId: -1
+  property real contextMenuX: 0
+  property real contextMenuY: 0
+  property bool workspaceContextOpen: false
+  property bool contextRenameMode: false
+  property string contextRenameText: ""
   // Bumped after Hyprland events so the workspace/client summaries are
   // rebuilt while the panel is open.
   property int workspaceRevision: 0
@@ -35,6 +41,7 @@ Item {
   property string pendingReorderSourceAddress: ""
   property string pendingReorderTargetAddress: ""
   property int pendingWorkspaceCreateId: -1
+  property int pendingWorkspacePersistId: -1
   property int pendingWorkspaceUnpersistId: -1
   property var createdWorkspaceIds: []
   property int currentPage: 0
@@ -42,6 +49,26 @@ Item {
   property bool showKeybindHint: false
   property bool settingsMode: false
   property int settingsSelection: 0
+  property bool altTabOpen: false
+  property int altTabIndex: -1
+  property var altTabCandidates: []
+  // The candidates are a snapshot of the MRU order for one Alt+Tab session.
+  // It may be pruned when a client ceases to be eligible, but it must not be
+  // reordered by focus events caused outside the switcher while it is open.
+  property var altTabSnapshot: []
+  property var altTabFocusHistory: []
+  property var altTabClosedAddresses: ({})
+  property string altTabDeferredFocusAddress: ""
+  property string altTabScope: "workspace"
+  property var altTabScroller: null
+  property var altTabPreviewRepeater: null
+
+  onAltTabOpenChanged: {
+    if (root.altTabOpen) Qt.callLater(root.ensureAltTabSelectionVisible)
+  }
+  onAltTabIndexChanged: {
+    if (root.altTabOpen) Qt.callLater(root.ensureAltTabSelectionVisible)
+  }
 
   readonly property int minimumWorkspaceCount: 8
   // Hyprland workspace IDs are signed integers. Keeping the accepted range
@@ -51,20 +78,25 @@ Item {
   readonly property int overviewColumns: 3
   readonly property int cardsPerPage: 9
   readonly property int cardGap: Style.space(12)
-  // Swipe behavior: "kinetic" follows momentum across multiple pages;
-  // "single-page" limits each swipe to the next or previous page.
-  property string flickBehavior: "kinetic"
+  // Swipe behavior defaults to one page at a time. Kinetic is an optional
+  // enhancement exposed by the single "Kinetic Swipe" toggle.
+  property string flickBehavior: "single-page"
   property bool blurEnabled: false
-  readonly property var flickBehaviorOptions: [
+  readonly property var settingsOptions: [
     {
-      value: "kinetic",
-      label: "Kinetic",
-      description: "A fast swipe can move across multiple workspace pages."
+      kind: "flick",
+      label: "Kinetic Swipe",
+      description: "Enable momentum to move across multiple workspace pages. Off uses Single Page."
     },
     {
-      value: "single-page",
-      label: "Single Page",
-      description: "Each swipe moves only to the next or previous page."
+      kind: "altTab",
+      label: "Alt+Tab: All Workspaces",
+      description: "Include windows from every workspace. Off uses the current workspace."
+    },
+    {
+      kind: "blur",
+      label: "Overview Background Blur",
+      description: "Blur the desktop behind the workspace overview."
     }
   ]
   readonly property string flickSettingsPath:
@@ -73,16 +105,19 @@ Item {
     'workspaceNavigatorBlurRule = workspaceNavigatorBlurRule or '
     + 'hl.layer_rule({ name = "workspace-navigator-blur", '
     + 'match = { namespace = "^roubilibo-workspace-navigator$" }, blur = true }); '
-    + 'workspaceNavigatorBlurRule:set_enabled(' + (root.blurEnabled ? "true" : "false") + '); '
+    + 'workspaceNavigatorBlurRule:set_enabled('
+    + (root.blurEnabled && root.opened && !root.settingsMode && !root.altTabOpen
+      ? "true" : "false") + '); '
     + 'hl.config({ decoration = { blur = { enabled = '
-    + (root.blurEnabled ? "true" : "false") + ' } } })'
+    + (root.blurEnabled && root.opened && !root.settingsMode && !root.altTabOpen
+      ? "true" : "false") + ' } } })'
   readonly property string launcherMenuDirectory:
     Quickshell.env("HOME") + "/.config/omarchy/extensions"
   readonly property string launcherMenuPath:
     root.launcherMenuDirectory + "/omarchy-menu.jsonc"
   readonly property string launcherMenuEntryText:
     '  "setup.workspace-navigator": {"icon":"󰒓","label":"Workspace Navigator",'
-    + '"description":"Configure swipe behavior and background blur",'
+    + '"description":"Configure swipe behavior, Alt+Tab scope, and blur",'
     + '"action":"omarchy-shell roubilibo.workspace-navigator settings"}'
   property bool launcherMenuRegistrationReady: false
   property FileView flickSettingsFile: FileView {
@@ -99,6 +134,8 @@ Item {
       if (settings.flickBehavior === "single-page"
           || settings.flickBehavior === "kinetic")
         root.flickBehavior = settings.flickBehavior
+      if (settings.altTabScope === "all" || settings.altTabScope === "workspace")
+        root.altTabScope = settings.altTabScope
       root.blurEnabled = settings.blurEnabled === true
       root.applyBlurState()
     } catch (e) {}
@@ -107,6 +144,7 @@ Item {
   function saveSettings() {
     flickSettingsFile.setText(JSON.stringify({
       flickBehavior: root.flickBehavior,
+      altTabScope: root.altTabScope,
       blurEnabled: root.blurEnabled
     }, null, 2) + "\n")
   }
@@ -114,13 +152,21 @@ Item {
   function setFlickBehavior(value) {
     var mode = String(value) === "single-page" ? "single-page" : "kinetic"
     root.flickBehavior = mode
-    root.settingsSelection = mode === "single-page" ? 1 : 0
+    root.settingsSelection = 0
+    root.saveSettings()
+    return "ok"
+  }
+
+  function setAltTabScope(value) {
+    root.altTabScope = String(value) === "all" ? "all" : "workspace"
+    root.settingsSelection = 1
     root.saveSettings()
     return "ok"
   }
 
   function setBlurEnabled(value) {
     root.blurEnabled = Boolean(value)
+    root.settingsSelection = 2
     root.saveSettings()
     root.applyBlurState()
     return "ok"
@@ -136,14 +182,27 @@ Item {
   }
 
   function selectSettings(delta) {
-    var count = root.flickBehaviorOptions.length
+    var count = root.settingsOptions.length
     if (count <= 0) return
     root.settingsSelection = (root.settingsSelection + delta + count) % count
   }
 
+  function toggleSettingsOption(index) {
+    var option = root.settingsOptions[index]
+    if (!option) return
+    root.settingsSelection = index
+    if (option.kind === "flick")
+      root.setFlickBehavior(root.flickBehavior === "kinetic"
+        ? "single-page" : "kinetic")
+    else if (option.kind === "altTab")
+      root.setAltTabScope(root.altTabScope === "all"
+        ? "workspace" : "all")
+    else if (option.kind === "blur")
+      root.setBlurEnabled(!root.blurEnabled)
+  }
+
   function activateSettingsSelection() {
-    var option = root.flickBehaviorOptions[root.settingsSelection]
-    if (option) root.setFlickBehavior(option.value)
+    root.toggleSettingsOption(root.settingsSelection)
   }
 
   function stripLauncherMenuComments(raw) {
@@ -198,6 +257,7 @@ Item {
 
   Component.onCompleted: {
     launcherMenuDirectoryProcess.running = true
+    root.rememberAltTabFocus(Hyprland.activeToplevel)
   }
 
   function workspaceById(id, revision) {
@@ -206,6 +266,12 @@ Item {
       if (values[i].id === id) return values[i]
     }
     return null
+  }
+
+  function workspaceName(workspace, id) {
+    if (!workspace) return ""
+    var name = String(workspace.name || "").trim()
+    return name !== "" && name !== String(id) ? name : ""
   }
 
   function positiveWorkspaceId(value) {
@@ -375,12 +441,427 @@ Item {
   }
 
   function focusWorkspace(id) {
+    root.closeWorkspaceContext()
     try {
       if (!root.dispatchFocusWorkspace(id)) return
     } catch (e) {
       console.warn("workspace overview: could not focus workspace", id, e)
     }
     root.dismiss()
+  }
+
+  function focusToplevel(toplevel) {
+    var address = root.normalizedAddress(toplevel)
+    if (!address) return
+
+    root.altTabOpen = false
+
+    try {
+      var workspace = toplevel && toplevel.workspace ? toplevel.workspace : null
+      var workspaceId = workspace ? root.positiveWorkspaceId(workspace.id) : -1
+      if (workspaceId > 0) root.dispatchFocusWorkspace(workspaceId)
+
+      if (Hyprland.usingLua) {
+        Hyprland.dispatch("hl.dsp.focus({ window = \"address:" + address + "\" })")
+      } else {
+        Hyprland.dispatch("focuswindow address:" + address)
+      }
+
+      // follow_mouse is a global Hyprland input option. It is already enabled
+      // on this system, so follow the selected window by moving the pointer to
+      // its center instead of changing the user's global input configuration.
+      var ipc = toplevel ? toplevel.lastIpcObject : null
+      var at = ipc && ipc.at && ipc.at.length >= 2 ? ipc.at : null
+      var size = ipc && ipc.size && ipc.size.length >= 2 ? ipc.size : null
+      if (at && size) {
+        var x = Number(at[0]) + Number(size[0]) / 2
+        var y = Number(at[1]) + Number(size[1]) / 2
+        if (isFinite(x) && isFinite(y))
+          Hyprland.dispatch("hl.dsp.cursor.move({ x = " + String(Math.round(x))
+            + ", y = " + String(Math.round(y)) + " })")
+      } else if (Hyprland.usingLua) {
+        // Keep the follow behavior for clients whose IPC geometry is not yet
+        // exposed by Quickshell; corner 0 is only a fallback target.
+        Hyprland.dispatch("hl.dsp.cursor.move_to_corner({ window = \"address:"
+          + address + "\", corner = 0 })")
+      }
+      root.selectedToplevel = toplevel
+    } catch (e) {
+      console.warn("workspace overview: could not focus window", address, e)
+    }
+    root.dismiss()
+  }
+
+  function rememberAltTabFocus(toplevel) {
+    var address = root.normalizedAddress(toplevel)
+    if (!address) return
+
+    // Highlighting a card is not a real focus change. If an external focus
+    // change arrives while the switcher is open, apply it only after the
+    // session ends so the MRU order remains stable during selection.
+    if (root.altTabOpen) {
+      root.altTabDeferredFocusAddress = address
+      return
+    }
+
+    root.rememberAltTabAddress(address)
+  }
+
+  function rememberAltTabAddress(address) {
+    var normalized = root.normalizedAddress(address)
+    if (!normalized) return
+    var history = [normalized]
+    for (var i = 0; i < root.altTabFocusHistory.length && history.length < 128; i++) {
+      var previous = root.altTabFocusHistory[i]
+      if (previous !== normalized) history.push(previous)
+    }
+    root.altTabFocusHistory = history
+  }
+
+  function syncAltTabFocusHistory() {
+    // A live switcher owns its snapshot. Do not let model refreshes reorder
+    // the real MRU list while the user is cycling through it.
+    if (root.altTabOpen) return
+
+    var values = []
+    try { values = Hyprland.toplevels.values } catch (e) {}
+    var present = {}
+    var eligible = []
+    for (var i = 0; i < values.length; i++) {
+      var address = root.normalizedAddress(values[i])
+      var ipc = values[i] ? values[i].lastIpcObject : null
+      if (!address || (ipc && ipc.hidden === true) || present[address]) continue
+      present[address] = true
+      eligible.push(values[i])
+    }
+
+    var activeAddress = root.normalizedAddress(Hyprland.activeToplevel)
+    var ordered = WindowModel.sortAltTabByRecency(
+      eligible, activeAddress, root.altTabFocusHistory)
+    var history = []
+    var seen = {}
+    for (var h = 0; h < root.altTabFocusHistory.length; h++) {
+      var remembered = root.altTabFocusHistory[h]
+      if (present[remembered] && !seen[remembered]) {
+        history.push(remembered)
+        seen[remembered] = true
+      }
+    }
+    for (var o = 0; o < ordered.length; o++) {
+      var orderedAddress = root.normalizedAddress(ordered[o])
+      if (orderedAddress && !seen[orderedAddress]) {
+        history.push(orderedAddress)
+        seen[orderedAddress] = true
+      }
+    }
+
+    // The active window is always the head of the real MRU list. This also
+    // repairs the initial state when the plugin starts after the first focus
+    // event has already happened.
+    if (activeAddress && present[activeAddress]) {
+      var activeHistory = [activeAddress]
+      for (var a = 0; a < history.length && activeHistory.length < 128; a++) {
+        if (history[a] !== activeAddress) activeHistory.push(history[a])
+      }
+      history = activeHistory
+    }
+    root.altTabFocusHistory = history.slice(0, 128)
+  }
+
+  function forgetAltTabWindow(event) {
+    var parts = []
+    try { parts = event && event.parse ? event.parse(1) : [] } catch (e) {}
+    var address = WindowModel.normalizedAddress(parts && parts[0])
+    if (!address)
+      address = WindowModel.normalizedAddress(
+        String(event && event.data ? event.data : "").split(",")[0])
+    if (!address) return
+
+    // Keep the real MRU immutable during a switcher session. The closed
+    // address is removed from the live snapshot immediately below and from
+    // the MRU on the next closed-state sync.
+    if (!root.altTabOpen) {
+      var history = []
+      for (var i = 0; i < root.altTabFocusHistory.length; i++) {
+        if (root.altTabFocusHistory[i] !== address)
+          history.push(root.altTabFocusHistory[i])
+      }
+      root.altTabFocusHistory = history
+    }
+
+    if (!root.altTabOpen) return
+    var closed = Object.assign({}, root.altTabClosedAddresses)
+    closed[address] = true
+    root.altTabClosedAddresses = closed
+    root.reconcileAltTabCandidates()
+  }
+
+  function altTabWindowList() {
+    root.syncAltTabFocusHistory()
+    var values = []
+    try { values = Hyprland.toplevels.values } catch (e) {}
+
+    // Keep closed addresses excluded until Quickshell's model has actually
+    // dropped them; an immediate refresh can still expose the old object.
+    var present = {}
+    for (var p = 0; p < values.length; p++) {
+      var presentAddress = root.normalizedAddress(values[p])
+      if (presentAddress) present[presentAddress] = true
+    }
+    var closed = {}
+    for (var key in root.altTabClosedAddresses) {
+      if (present[key]) closed[key] = true
+    }
+    root.altTabClosedAddresses = closed
+
+    var currentWorkspaceId = Hyprland.focusedWorkspace
+      ? root.positiveWorkspaceId(Hyprland.focusedWorkspace.id) : -1
+    var result = []
+    for (var i = 0; i < values.length; i++) {
+      var toplevel = values[i]
+      var address = root.normalizedAddress(toplevel)
+      var workspace = toplevel && toplevel.workspace ? toplevel.workspace : null
+      var workspaceId = workspace ? root.positiveWorkspaceId(workspace.id) : -1
+      var ipc = toplevel ? toplevel.lastIpcObject : null
+      if (!address || root.altTabClosedAddresses[address] || workspaceId < 1)
+        continue
+      if (ipc && ipc.hidden === true) continue
+      if (root.altTabScope === "workspace" && workspaceId !== currentWorkspaceId)
+        continue
+      result.push(toplevel)
+    }
+    return WindowModel.sortAltTabByRecency(result,
+      root.normalizedAddress(Hyprland.activeToplevel), root.altTabFocusHistory)
+  }
+
+  function refreshAltTabCandidates() {
+    root.altTabCandidates = root.altTabWindowList()
+  }
+
+  function reconcileAltTabCandidates() {
+    if (!root.altTabOpen) return
+    var selected = root.altTabCandidates[root.altTabIndex]
+    var updated = WindowModel.reconcileAltTabCandidates(
+      root.altTabCandidates, root.altTabWindowList(),
+      root.normalizedAddress(selected), root.altTabIndex, false)
+    if (updated.candidates.length === 0) {
+      root.altTabCancel()
+      return
+    }
+    root.altTabCandidates = updated.candidates
+    root.altTabSnapshot = updated.candidates.slice()
+    root.altTabIndex = updated.index
+    root.selectedToplevel = updated.candidates[updated.index]
+  }
+
+  function altTabWorkspaceLabel(toplevel) {
+    var workspace = toplevel && toplevel.workspace ? toplevel.workspace : null
+    var id = workspace ? root.positiveWorkspaceId(workspace.id) : -1
+    var name = root.workspaceName(workspace, id)
+    if (id < 1) return ""
+    return name === "" ? "WS " + String(id) : name
+  }
+
+  function altTabPreviewHeight() {
+    var scroller = root.altTabScroller
+    return scroller
+      ? Math.max(1, Math.min(Style.space(190),
+          scroller.height - Style.space(64)))
+      : Style.space(160)
+  }
+
+  function ensureAltTabSelectionVisible() {
+    var scroller = root.altTabScroller
+    var repeater = root.altTabPreviewRepeater
+    if (!root.altTabOpen || root.altTabIndex < 0 || !scroller || !repeater)
+      return
+    var item = repeater.itemAt(root.altTabIndex)
+    if (!item) {
+      Qt.callLater(root.ensureAltTabSelectionVisible)
+      return
+    }
+
+    var left = item.mapToItem(scroller.contentItem, 0, 0).x
+    var right = left + item.width
+    var viewLeft = scroller.contentX
+    var viewRight = viewLeft + scroller.width
+    if (left < viewLeft) {
+      scroller.contentX = Math.max(0, left)
+    } else if (right > viewRight) {
+      scroller.contentX = Math.min(
+        Math.max(0, scroller.contentWidth - scroller.width),
+        right - scroller.width)
+    }
+  }
+
+  function altTabStep(reverse) {
+    if (!root.altTabOpen) {
+      try {
+        Hyprland.refreshWorkspaces()
+        Hyprland.refreshToplevels()
+      } catch (e) {}
+      root.syncAltTabFocusHistory()
+      var snapshot = root.altTabWindowList()
+      root.altTabSnapshot = snapshot.slice()
+      root.altTabCandidates = root.altTabSnapshot.slice()
+      var count = root.altTabSnapshot.length
+      if (count <= 0) return
+
+      var activeAddress = root.normalizedAddress(Hyprland.activeToplevel)
+      var activeIndex = -1
+      for (var i = 0; i < count; i++) {
+        if (root.normalizedAddress(root.altTabSnapshot[i]) === activeAddress) {
+          activeIndex = i
+          break
+        }
+      }
+      if (activeIndex < 0) activeIndex = 0
+      // The real MRU list has the active window at index 0. The first normal
+      // Alt+Tab therefore always selects snapshot[1], independent of the
+      // compositor's toplevel enumeration order.
+      root.altTabIndex = count === 1 ? 0
+        : (reverse ? count - 1 : 1)
+      root.altTabOpen = true
+    } else {
+      root.reconcileAltTabCandidates()
+      if (!root.altTabOpen) return
+      var candidateCount = root.altTabCandidates.length
+      if (candidateCount <= 0) return
+      root.altTabIndex = (root.altTabIndex + (reverse ? -1 : 1) + candidateCount)
+        % candidateCount
+    }
+    root.selectedToplevel = root.altTabCandidates[root.altTabIndex] || null
+    root.applyBlurState()
+  }
+
+  function altTabCommit() {
+    if (!root.altTabOpen) return
+    root.reconcileAltTabCandidates()
+    if (!root.altTabOpen) return
+    var selected = root.altTabCandidates[root.altTabIndex]
+    if (!selected) {
+      root.altTabCancel()
+      return
+    }
+    // Close the switcher before dispatching focus. This also keeps the
+    // release binding reliable if a client disappears between two tabs.
+    altTabRefreshTimer.stop()
+    root.altTabOpen = false
+    root.altTabIndex = -1
+    root.altTabCandidates = []
+    root.altTabSnapshot = []
+    root.altTabDeferredFocusAddress = ""
+    root.selectedToplevel = null
+    root.applyBlurState()
+    root.focusToplevel(selected)
+  }
+
+  function closeAltTabSession(applyDeferredFocus) {
+    altTabRefreshTimer.stop()
+    var deferred = root.altTabDeferredFocusAddress
+    root.altTabDeferredFocusAddress = ""
+    root.altTabOpen = false
+    root.altTabIndex = -1
+    root.altTabCandidates = []
+    root.altTabSnapshot = []
+    root.selectedToplevel = null
+    root.applyBlurState()
+    if (applyDeferredFocus && deferred)
+      root.rememberAltTabAddress(deferred)
+  }
+
+  function altTabCancel() {
+    root.closeAltTabSession(true)
+  }
+
+  function openWorkspaceContext(id, x, y) {
+    var workspaceId = root.positiveWorkspaceId(id)
+    if (workspaceId < 1) return
+    var workspace = root.workspaceById(workspaceId, root.workspaceRevision)
+    root.contextWorkspaceId = workspaceId
+    root.contextMenuX = Number(x) || 0
+    root.contextMenuY = Number(y) || 0
+    root.contextRenameText = root.workspaceName(workspace, workspaceId)
+    root.contextRenameMode = false
+    root.workspaceContextOpen = true
+  }
+
+  function closeWorkspaceContext() {
+    root.workspaceContextOpen = false
+    root.contextRenameMode = false
+    root.contextWorkspaceId = -1
+  }
+
+  function contextWorkspace() {
+    return root.workspaceById(root.contextWorkspaceId, root.workspaceRevision)
+  }
+
+  function contextCanMoveSelectedWindow() {
+    var workspace = root.contextWorkspace()
+    var selectedWorkspace = root.selectedToplevel && root.selectedToplevel.workspace
+      ? root.positiveWorkspaceId(root.selectedToplevel.workspace.id) : -1
+    return workspace !== null && root.normalizedAddress(root.selectedToplevel) !== ""
+      && selectedWorkspace > 0 && selectedWorkspace !== root.contextWorkspaceId
+  }
+
+  function beginWorkspaceRename() {
+    if (!root.contextWorkspace()) return
+    root.contextRenameText = root.workspaceName(
+      root.contextWorkspace(), root.contextWorkspaceId)
+    root.contextRenameMode = true
+    Qt.callLater(function() {
+      workspaceRenameInput.forceActiveFocus()
+      workspaceRenameInput.selectAll()
+    })
+  }
+
+  function cancelWorkspaceRename() {
+    root.contextRenameMode = false
+    root.contextRenameText = ""
+  }
+
+  function luaString(value) {
+    return String(value || "")
+      .replace(/[\u0000-\u001f\u007f]/g, " ")
+      .replace(/\\/g, "\\\\")
+      .replace(/\"/g, "\\\"")
+      .slice(0, 80)
+  }
+
+  function commitWorkspaceRename() {
+    var name = root.luaString(workspaceRenameInput.text).trim()
+    if (name === "") return
+    var id = root.positiveWorkspaceId(root.contextWorkspaceId)
+    if (id < 1) return
+
+    try {
+      if (Hyprland.usingLua)
+        Hyprland.dispatch("hl.dsp.workspace.rename({ workspace = \""
+          + String(id) + "\", name = \"" + name + "\" })")
+      else
+        Hyprland.dispatch("renameworkspace " + String(id) + " " + name)
+      root.cancelWorkspaceRename()
+      root.closeWorkspaceContext()
+      refreshTimer.restart()
+    } catch (e) {
+      console.warn("workspace overview: could not rename workspace", id, e)
+    }
+  }
+
+  function makeWorkspacePersistent() {
+    var id = root.positiveWorkspaceId(root.contextWorkspaceId)
+    if (id < 1 || workspacePersistProcess.running) return
+    root.pendingWorkspacePersistId = id
+    root.closeWorkspaceContext()
+    workspacePersistProcess.running = true
+  }
+
+  function moveSelectedWindowToContext() {
+    if (!root.contextCanMoveSelectedWindow()) return
+    var id = root.contextWorkspaceId
+    var toplevel = root.selectedToplevel
+    root.closeWorkspaceContext()
+    root.moveWindowToWorkspace(toplevel, id)
   }
 
   function scrollToPage(page) {
@@ -618,15 +1099,33 @@ Item {
   function open(payloadJson) {
     var payload = ({})
     try { payload = JSON.parse(String(payloadJson || "{}")) } catch (e) {}
+    if (payload.mode === "alt-tab-next") {
+      root.altTabStep(false)
+      return
+    }
+    if (payload.mode === "alt-tab-previous") {
+      root.altTabStep(true)
+      return
+    }
+    if (payload.mode === "alt-tab-commit") {
+      root.altTabCommit()
+      return
+    }
+    if (payload.mode === "alt-tab-cancel") {
+      root.altTabCancel()
+      return
+    }
+    root.altTabCancel()
     root.settingsMode = payload.mode === "settings"
     if (root.settingsMode)
-      root.settingsSelection = root.flickBehavior === "single-page" ? 1 : 0
+      root.settingsSelection = 0
     try { Hyprland.refreshWorkspaces(); Hyprland.refreshToplevels() } catch (e) {}
     root.workspaceRevision += 1
     root.selectedToplevel = null
     root.showKeybindHint = false
     root.selectedIndex = root.focusedIndex()
     root.opened = true
+    root.applyBlurState()
     root.currentPage = root.pageForIndex(root.selectedIndex)
     Qt.callLater(function() {
       root.clampSelection()
@@ -638,6 +1137,8 @@ Item {
     root.opened = false
     root.settingsMode = false
     root.showKeybindHint = false
+    root.altTabCancel()
+    root.applyBlurState()
   }
 
   function toggleKeybindHint() {
@@ -652,7 +1153,8 @@ Item {
   }
 
   function toggle() {
-    if (root.opened) root.dismiss()
+    if (root.altTabOpen) root.altTabCancel()
+    else if (root.opened) root.dismiss()
     else root.open("{}")
   }
 
@@ -670,6 +1172,13 @@ Item {
     interval: 75
     repeat: false
     onTriggered: root.workspaceRevision += 1
+  }
+
+  Timer {
+    id: altTabRefreshTimer
+    interval: 100
+    repeat: false
+    onTriggered: root.reconcileAltTabCandidates()
   }
 
   Timer {
@@ -784,6 +1293,22 @@ Item {
   }
 
   Process {
+    id: workspacePersistProcess
+    command: ["hyprctl", "eval",
+      "hl.workspace_rule({ workspace = \"" + String(root.pendingWorkspacePersistId)
+        + "\", persistent = true })"]
+    onExited: function(exitCode) {
+      var workspaceId = root.pendingWorkspacePersistId
+      root.pendingWorkspacePersistId = -1
+      if (exitCode !== 0)
+        console.warn("workspace overview: could not make workspace persistent",
+          workspaceId, "hyprctl exited with", exitCode)
+      else
+        root.workspaceRevision += 1
+    }
+  }
+
+  Process {
     id: workspaceUnpersistProcess
     command: ["hyprctl", "eval",
       "hl.workspace_rule({ workspace = \"" + String(root.pendingWorkspaceUnpersistId)
@@ -800,18 +1325,22 @@ Item {
 
   Connections {
     target: Hyprland
+    function onActiveToplevelChanged() {
+      root.rememberAltTabFocus(Hyprland.activeToplevel)
+    }
     function onRawEvent(event) {
-      if (!root.opened) return
+      var name = event && event.name ? String(event.name) : ""
+      if (name === "closewindow") root.forgetAltTabWindow(event)
+      if (!root.opened && !root.altTabOpen) return
 
       // Keep the delegate tree stable until the native drag session has
       // released the pointer. The final refresh is scheduled by
       // endWindowDrag().
-      if (root.draggedToplevel !== null) {
+      if (root.opened && root.draggedToplevel !== null && !root.altTabOpen) {
         root.refreshAfterDrag = true
         return
       }
 
-      var name = event && event.name ? String(event.name) : ""
       var workspaceChanged = name.indexOf("monitor") !== -1
         || name.indexOf("moveworkspace") === 0
         || name.indexOf("workspace") !== -1
@@ -825,7 +1354,9 @@ Item {
         Hyprland.refreshWorkspaces()
       if (toplevelChanged)
         Hyprland.refreshToplevels()
-      refreshTimer.restart()
+      if (root.altTabOpen && (workspaceChanged || toplevelChanged))
+        altTabRefreshTimer.restart()
+      if (root.opened) refreshTimer.restart()
     }
   }
 
@@ -839,17 +1370,26 @@ Item {
     function setFlickBehavior(mode: string): string {
       return root.setFlickBehavior(mode)
     }
+    function setAltTabScope(scope: string): string {
+      return root.setAltTabScope(scope)
+    }
     function setBlurEnabled(value: string): string {
       var enabled = value === "true" || value === "1" || value === "on"
       return root.setBlurEnabled(enabled)
     }
+    function altTabNext(): string { root.altTabStep(false); return "ok" }
+    function altTabPrevious(): string { root.altTabStep(true); return "ok" }
+    function altTabCommit(): string { root.altTabCommit(); return "ok" }
+    function altTabCancel(): string { root.altTabCancel(); return "ok" }
     function focus(id: string): string {
       var workspaceId = root.positiveWorkspaceId(id)
       if (workspaceId < 1) return "invalid workspace"
       root.focusWorkspace(workspaceId)
       return "ok"
     }
-    function state(): string { return root.opened ? "open" : "closed" }
+    function state(): string {
+      return root.altTabOpen ? "alt-tab" : (root.opened ? "open" : "closed")
+    }
   }
 
   // A surface is created for every output, but only the output currently
@@ -865,7 +1405,7 @@ Item {
         readonly property var panelScreen: modelData
 
         screen: modelData
-        visible: root.opened && (Quickshell.screens.length === 1
+        visible: (root.opened || root.altTabOpen) && (Quickshell.screens.length === 1
           || root.isFocusedScreen(modelData))
         color: "transparent"
         exclusionMode: ExclusionMode.Ignore
@@ -880,11 +1420,15 @@ Item {
 
         Rectangle {
           anchors.fill: parent
+          visible: root.opened && !root.settingsMode && !root.altTabOpen
           color: Util.alpha(Color.background, 0.92)
 
           MouseArea {
             anchors.fill: parent
-            onClicked: root.dismiss()
+            onClicked: {
+              if (root.workspaceContextOpen) root.closeWorkspaceContext()
+              else root.dismiss()
+            }
           }
         }
 
@@ -905,8 +1449,36 @@ Item {
 
           Keys.onPressed: function(event) {
             if (event.key === Qt.Key_Escape) {
-              root.dismiss()
+              if (root.workspaceContextOpen) root.closeWorkspaceContext()
+              else if (root.altTabOpen) root.altTabCancel()
+              else root.dismiss()
               event.accepted = true
+            } else if (root.altTabOpen) {
+              if (event.key === Qt.Key_Left || event.key === Qt.Key_H
+                  || (event.key === Qt.Key_Tab
+                    && (event.modifiers & Qt.ShiftModifier))) {
+                root.altTabStep(true)
+                event.accepted = true
+              } else if (event.key === Qt.Key_Right || event.key === Qt.Key_L
+                         || event.key === Qt.Key_Tab) {
+                root.altTabStep(false)
+                event.accepted = true
+              } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter
+                         || event.key === Qt.Key_Space) {
+                root.altTabCommit()
+                event.accepted = true
+              }
+            } else if (root.workspaceContextOpen && !root.contextRenameMode) {
+              if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                root.focusWorkspace(root.contextWorkspaceId)
+                event.accepted = true
+              } else if (event.key === Qt.Key_R) {
+                root.beginWorkspaceRename()
+                event.accepted = true
+              } else if (event.key === Qt.Key_M) {
+                root.moveSelectedWindowToContext()
+                event.accepted = true
+              }
             } else if (root.settingsMode) {
               if (event.key === Qt.Key_Up || event.key === Qt.Key_K) {
                 root.selectSettings(-1)
@@ -945,9 +1517,17 @@ Item {
             }
           }
 
+          Keys.onReleased: function(event) {
+            if (root.altTabOpen
+                && (event.key === Qt.Key_Alt || event.key === Qt.Key_AltGr)) {
+              root.altTabCommit()
+              event.accepted = true
+            }
+          }
+
           ColumnLayout {
             id: overviewColumn
-            visible: !root.settingsMode
+            visible: root.opened && !root.settingsMode && !root.altTabOpen
             anchors.centerIn: parent
             width: parent.width - Style.space(48)
             height: parent.height - Style.space(48)
@@ -966,8 +1546,8 @@ Item {
             Text {
               Layout.fillWidth: true
               text: root.pageCountFor(root.workspaceEntries(root.workspaceRevision).length) > 1
-                ? "Swipe horizontally for additional workspaces  •  Right-click a card to enter"
-                : "Right-click a card to enter  •  Left-drag thumbnails to move or reorder"
+                ? "Swipe horizontally for additional workspaces  •  Click a card to enter"
+                : "Click a card to enter  •  Click a thumbnail to focus  •  Right-click for actions"
               color: Util.alpha(Color.foreground, 0.65)
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
@@ -1004,6 +1584,7 @@ Item {
               id: workspaceFlickable
               property real swipeStartX: 0
               property int swipeStartPage: 0
+              property real horizontalWheelAccumulator: 0
               Component.onCompleted: root.workspaceScroller = workspaceFlickable
               Layout.fillWidth: true
               Layout.fillHeight: true
@@ -1015,11 +1596,55 @@ Item {
                 root.workspaceEntries(root.workspaceRevision).length) > 1
               flickableDirection: Flickable.HorizontalFlick
               boundsBehavior: Flickable.StopAtBounds
+
+              // Wayland touchpads expose a two-finger horizontal swipe as
+              // wheel/axis events rather than as a single-pointer drag.
+              // Flickable does not page on those events by itself, so bridge
+              // the horizontal delta to the same page snap used by dragging.
+              function handleHorizontalWheel(event) {
+                var angle = event.angleDelta
+                var pixel = event.pixelDelta
+                var angleX = angle ? Number(angle.x) : 0
+                var angleY = angle ? Number(angle.y) : 0
+                var pixelX = pixel ? Number(pixel.x) : 0
+                var pixelY = pixel ? Number(pixel.y) : 0
+                var horizontalX = pixelX !== 0 ? pixelX : angleX
+                var horizontalY = pixelY !== 0 ? pixelY : angleY
+                if (!isFinite(horizontalX) || !isFinite(horizontalY)
+                    || horizontalX === 0
+                    || Math.abs(horizontalX) <= Math.abs(horizontalY))
+                  return
+
+                var delta = pixelX !== 0 ? pixelX : angleX
+                horizontalWheelAccumulator += delta
+
+                var threshold = pixelX !== 0 ? 48 : 120
+                if (Math.abs(horizontalWheelAccumulator) < threshold)
+                  return
+
+                var direction = horizontalWheelAccumulator > 0 ? 1 : -1
+                horizontalWheelAccumulator = 0
+                root.scrollToPage(root.currentPage + direction)
+                event.accepted = true
+              }
+
+              // MouseArea.onWheel is the reliable path for libinput axis
+              // events in Quickshell, including two-finger touchpad swipes.
+              MouseArea {
+                anchors.fill: parent
+                z: 100
+                acceptedButtons: Qt.NoButton
+                onWheel: function(event) {
+                  workspaceFlickable.handleHorizontalWheel(event)
+                }
+              }
+
               // Make page swipes feel snappier by increasing the travel speed
               // and letting the flick settle sooner.
               maximumFlickVelocity: 8000
               flickDeceleration: 5000
               onMovementStarted: {
+                horizontalWheelAccumulator = 0
                 swipeStartX = contentX
                 swipeStartPage = root.currentPage
               }
@@ -1125,7 +1750,11 @@ Item {
                           deletable: !addCard && cardWorkspaceId > root.minimumWorkspaceCount
                           workspace: addCard ? null
                             : root.workspaceById(cardWorkspaceId, root.workspaceRevision)
+                          workspaceName: addCard ? "" : root.workspaceName(
+                            root.workspaceById(cardWorkspaceId, root.workspaceRevision),
+                            cardWorkspaceId)
                           previewScreen: panelScreen
+                          contextTarget: keyCatcher
                           focused: !addCard && Hyprland.focusedWorkspace !== null
                             && Hyprland.focusedWorkspace.id === cardWorkspaceId
                           keyboardSelected: root.selectedIndex === absoluteIndex
@@ -1138,6 +1767,9 @@ Item {
                             if (addCard) root.addWorkspace()
                             else root.focusWorkspace(cardWorkspaceId)
                           }
+                          onWorkspaceContextRequested: function(x, y) {
+                            root.openWorkspaceContext(cardWorkspaceId, x, y)
+                          }
                           onAddWorkspaceRequested: root.addWorkspace()
                           onWorkspaceDeleteRequested: root.deleteWorkspace(cardWorkspaceId)
                           onWindowDragStarted: function(toplevel) {
@@ -1146,6 +1778,7 @@ Item {
                           }
                           onWindowDragFinished: function(toplevel) { root.endWindowDrag(toplevel) }
                           onWindowSelected: function(toplevel) { root.selectWindow(toplevel) }
+                          onWindowActivated: function(toplevel) { root.focusToplevel(toplevel) }
                           onWindowDropped: function(toplevel) {
                             root.moveWindowToWorkspace(toplevel, cardWorkspaceId)
                           }
@@ -1167,11 +1800,108 @@ Item {
                   + String(root.currentPage + 1) + "/"
                   + String(root.pageCountFor(root.workspaceEntries(root.workspaceRevision).length))
                   + "    swipe right for next page →    ?: show/hide shortcuts"
-                : "8 workspaces +    Left-drag thumbnail: move/reorder    Right-click card: enter    ?: show/hide shortcuts"
+                : "Click card: enter    Click thumbnail: focus    Left-drag: move/swap    Right-click: actions    ?: shortcuts"
               color: Util.alpha(Color.foreground, 0.50)
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
               horizontalAlignment: Text.AlignHCenter
+            }
+          }
+
+          Rectangle {
+            id: altTabOverlay
+            visible: root.altTabOpen
+            z: 20
+            anchors.centerIn: parent
+            width: Math.min(parent.width - Style.space(48),
+              Math.max(Style.space(420),
+                altTabRow.implicitWidth + Style.space(48)))
+            // The popup follows the card row's natural width. Its height is
+            // independent of the number of windows.
+            height: Math.min(parent.height - Style.space(48), Style.space(320))
+            radius: Style.cornerRadius
+            color: Color.menu.background
+            border.width: 1
+            border.color: Util.alpha(Color.menu.border, 0.48)
+            // This is the maximum width of a landscape preview. Individual
+            // cards derive their width from their own window ratio below, so
+            // portrait windows are never forced into a cropped landscape box.
+            property real previewWidth: Style.space(240)
+
+            ColumnLayout {
+              anchors.fill: parent
+              anchors.margins: Style.space(24)
+              spacing: Style.space(12)
+
+              RowLayout {
+                Layout.fillWidth: true
+
+                Text {
+                  Layout.fillWidth: true
+                  text: "Alt+Tab"
+                  color: Color.menu.text
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.title
+                  font.bold: true
+                }
+
+                Text {
+                  text: root.altTabScope === "all" ? "All workspaces" : "Current workspace"
+                  color: Util.alpha(Color.menu.text, 0.68)
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+
+              Flickable {
+                id: altTabFlickable
+                Component.onCompleted: root.altTabScroller = altTabFlickable
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                contentWidth: Math.max(width, altTabRow.width)
+                contentHeight: height
+                flickableDirection: Flickable.HorizontalFlick
+                boundsBehavior: Flickable.StopAtBounds
+
+                Row {
+                  id: altTabRow
+                  x: Math.max(0, (altTabFlickable.width - width) / 2)
+                  height: altTabFlickable.height
+                  spacing: Style.space(10)
+
+                  Repeater {
+                    id: altTabRepeater
+                    Component.onCompleted: root.altTabPreviewRepeater = altTabRepeater
+                    model: root.altTabCandidates
+
+                    delegate: AltTabPreview {
+                      required property var modelData
+                      required property int index
+                      // Reserve the caption area, then derive the card width
+                      // from the source geometry. This makes every preview
+                      // preserve the real window shape, even with mixed
+                      // landscape and portrait clients.
+                      readonly property real maxPreviewHeight:
+                        root.altTabPreviewHeight()
+                      width: Math.min(
+                        altTabOverlay.previewWidth,
+                        maxPreviewHeight * sourceWidth
+                          / Math.max(1, sourceHeight))
+                      height: width * sourceHeight
+                        / Math.max(1, sourceWidth) + Style.space(64)
+                      y: (altTabFlickable.height - height) / 2
+                      toplevel: modelData
+                      selected: index === root.altTabIndex
+                      workspaceLabel: root.altTabWorkspaceLabel(modelData)
+                      onActivated: {
+                        root.altTabIndex = index
+                        root.altTabCommit()
+                      }
+                    }
+                  }
+                }
+              }
             }
           }
 
@@ -1204,7 +1934,7 @@ Item {
 
               Text {
                 Layout.fillWidth: true
-                text: "Choose swipe behavior and background blur."
+                text: "Enable optional workspace navigation behaviors."
                 color: Util.alpha(Color.menu.text, 0.70)
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
@@ -1213,73 +1943,21 @@ Item {
               }
 
               Repeater {
-                model: root.flickBehaviorOptions
+                model: root.settingsOptions
 
-                delegate: Rectangle {
+                delegate: Toggle {
                   required property var modelData
                   required property int index
                   Layout.fillWidth: true
-                  implicitHeight: Style.space(70)
-                  radius: Style.cornerRadius
-                  color: index === root.settingsSelection
-                    ? Util.alpha(Color.accent, 0.20)
-                    : Util.alpha(Color.menu.text, 0.05)
-                  border.width: index === root.settingsSelection ? 2 : 1
-                  border.color: index === root.settingsSelection
-                    ? Color.accent : Util.alpha(Color.menu.border, 0.26)
-
-                  RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: Style.space(16)
-                    anchors.rightMargin: Style.space(16)
-                    spacing: Style.space(12)
-
-                    Text {
-                      text: index === root.settingsSelection ? "●" : "○"
-                      color: index === root.settingsSelection
-                        ? Color.accent : Util.alpha(Color.menu.text, 0.56)
-                      font.pixelSize: Style.font.title
-                    }
-
-                    ColumnLayout {
-                      Layout.fillWidth: true
-                      spacing: Style.space(2)
-
-                      Text {
-                        Layout.fillWidth: true
-                        text: modelData.label
-                        color: Color.menu.text
-                        font.family: Style.font.family
-                        font.pixelSize: Style.font.body
-                        font.bold: true
-                      }
-
-                      Text {
-                        Layout.fillWidth: true
-                        text: modelData.description
-                        color: Util.alpha(Color.menu.text, 0.66)
-                        font.family: Style.font.family
-                        font.pixelSize: Style.font.bodySmall
-                        wrapMode: Text.WordWrap
-                      }
-                    }
-                  }
-
-                  TapHandler {
-                    onTapped: {
-                      root.settingsSelection = index
-                      root.setFlickBehavior(modelData.value)
-                    }
-                  }
+                  label: modelData.label
+                  description: modelData.description
+                  hasCursor: root.settingsSelection === index
+                  checked: modelData.kind === "flick"
+                    ? root.flickBehavior === "kinetic"
+                    : (modelData.kind === "altTab"
+                      ? root.altTabScope === "all" : root.blurEnabled)
+                  onClicked: root.toggleSettingsOption(index)
                 }
-              }
-
-              Toggle {
-                Layout.fillWidth: true
-                label: "Background Blur"
-                description: "Blur the desktop behind Workspace Navigator."
-                checked: root.blurEnabled
-                onClicked: root.setBlurEnabled(!root.blurEnabled)
               }
 
               Text {
@@ -1311,6 +1989,310 @@ Item {
                 }
 
                 TapHandler { onTapped: root.dismiss() }
+              }
+            }
+          }
+
+          Rectangle {
+            id: workspaceContextMenu
+            visible: root.workspaceContextOpen
+            z: 100
+            width: Style.space(320)
+            height: contextMenuColumn.implicitHeight + Style.space(24)
+            x: Math.max(Style.space(24), Math.min(root.contextMenuX,
+              parent.width - width - Style.space(24)))
+            y: Math.max(Style.space(24), Math.min(root.contextMenuY,
+              parent.height - height - Style.space(24)))
+            radius: Style.cornerRadius
+            color: Color.menu.background
+            border.width: 1
+            border.color: Util.alpha(Color.menu.border, 0.42)
+
+            // Keep clicks inside the menu from reaching the overview scrim.
+            MouseArea {
+              anchors.fill: parent
+              acceptedButtons: Qt.AllButtons
+              onClicked: mouse.accepted = true
+            }
+
+            ColumnLayout {
+              id: contextMenuColumn
+              anchors.fill: parent
+              anchors.margins: Style.space(12)
+              spacing: Style.space(6)
+
+              Text {
+                Layout.fillWidth: true
+                text: {
+                  var workspace = root.contextWorkspace()
+                  var name = root.workspaceName(workspace, root.contextWorkspaceId)
+                  return name === "" ? "WS " + String(root.contextWorkspaceId)
+                    : name
+                }
+                color: Color.menu.text
+                font.family: Style.font.family
+                font.pixelSize: Style.font.body
+                font.bold: true
+                elide: Text.ElideRight
+              }
+
+              Text {
+                Layout.fillWidth: true
+                text: "Workspace actions"
+                color: Util.alpha(Color.menu.text, 0.54)
+                font.family: Style.font.family
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: root.contextRenameMode ? Style.space(38) : 0
+                visible: root.contextRenameMode
+                radius: Style.cornerRadius
+                color: Util.alpha(Color.menu.text, 0.07)
+                border.width: 1
+                border.color: Color.accent
+
+                TextInput {
+                  id: workspaceRenameInput
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(10)
+                  anchors.rightMargin: Style.space(10)
+                  text: root.contextRenameText
+                  color: Color.menu.text
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.body
+                  verticalAlignment: TextInput.AlignVCenter
+                  selectByMouse: true
+                  clip: true
+                  Keys.onReturnPressed: root.commitWorkspaceRename()
+                  Keys.onEscapePressed: root.cancelWorkspaceRename()
+                }
+              }
+
+              Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: root.contextRenameMode ? 0 : Style.space(38)
+                visible: !root.contextRenameMode
+                radius: Style.cornerRadius
+                color: focusWorkspaceMouse.containsMouse
+                  ? Util.alpha(Color.accent, 0.20) : "transparent"
+
+                Text {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(10)
+                  text: "Focus workspace"
+                  color: Color.menu.text
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.body
+                  verticalAlignment: Text.AlignVCenter
+                }
+
+                Text {
+                  anchors.right: parent.right
+                  anchors.rightMargin: Style.space(10)
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "Enter"
+                  color: Util.alpha(Color.menu.text, 0.48)
+                  font.family: Style.font.menuFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                MouseArea {
+                  id: focusWorkspaceMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  onClicked: root.focusWorkspace(root.contextWorkspaceId)
+                }
+              }
+
+              Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: root.contextRenameMode ? 0 : Style.space(38)
+                visible: !root.contextRenameMode
+                radius: Style.cornerRadius
+                color: renameWorkspaceMouse.containsMouse
+                  ? Util.alpha(Color.accent, 0.20) : "transparent"
+
+                Text {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(10)
+                  text: "Rename workspace"
+                  color: Color.menu.text
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.body
+                  verticalAlignment: Text.AlignVCenter
+                }
+
+                Text {
+                  anchors.right: parent.right
+                  anchors.rightMargin: Style.space(10)
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "R"
+                  color: Util.alpha(Color.menu.text, 0.48)
+                  font.family: Style.font.menuFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                MouseArea {
+                  id: renameWorkspaceMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  onClicked: root.beginWorkspaceRename()
+                }
+              }
+
+              Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: root.contextRenameMode ? 0 : Style.space(38)
+                visible: !root.contextRenameMode
+                radius: Style.cornerRadius
+                color: moveWindowMouse.containsMouse && root.contextCanMoveSelectedWindow()
+                  ? Util.alpha(Color.accent, 0.20) : "transparent"
+                opacity: root.contextCanMoveSelectedWindow() ? 1 : 0.45
+
+                Text {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(10)
+                  text: "Move selected window here"
+                  color: Color.menu.text
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.body
+                  verticalAlignment: Text.AlignVCenter
+                }
+
+                Text {
+                  anchors.right: parent.right
+                  anchors.rightMargin: Style.space(10)
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "M"
+                  color: Util.alpha(Color.menu.text, 0.48)
+                  font.family: Style.font.menuFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                MouseArea {
+                  id: moveWindowMouse
+                  anchors.fill: parent
+                  enabled: root.contextCanMoveSelectedWindow()
+                  hoverEnabled: true
+                  onClicked: root.moveSelectedWindowToContext()
+                }
+              }
+
+              Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: root.contextRenameMode ? 0 : Style.space(38)
+                visible: !root.contextRenameMode
+                radius: Style.cornerRadius
+                color: persistentWorkspaceMouse.containsMouse
+                  ? Util.alpha(Color.accent, 0.20) : "transparent"
+
+                Text {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(10)
+                  text: "Make persistent"
+                  color: Color.menu.text
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.body
+                  verticalAlignment: Text.AlignVCenter
+                }
+
+                MouseArea {
+                  id: persistentWorkspaceMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  onClicked: root.makeWorkspacePersistent()
+                }
+              }
+
+              Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: root.contextRenameMode ? 0 : Style.space(38)
+                visible: !root.contextRenameMode
+                radius: Style.cornerRadius
+                color: deleteWorkspaceMouse.containsMouse && root.contextWorkspaceId > root.minimumWorkspaceCount
+                  ? Util.alpha(Color.urgent, 0.20) : "transparent"
+                opacity: root.contextWorkspaceId > root.minimumWorkspaceCount
+                  && root.workspaceWindowCount(root.contextWorkspace(), root.workspaceRevision) === 0
+                  ? 1 : 0.42
+
+                Text {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(10)
+                  text: "Delete empty workspace"
+                  color: root.contextWorkspaceId > root.minimumWorkspaceCount
+                    ? Color.menu.text : Util.alpha(Color.menu.text, 0.58)
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.body
+                  verticalAlignment: Text.AlignVCenter
+                }
+
+                MouseArea {
+                  id: deleteWorkspaceMouse
+                  anchors.fill: parent
+                  enabled: root.contextWorkspaceId > root.minimumWorkspaceCount
+                    && root.workspaceWindowCount(root.contextWorkspace(), root.workspaceRevision) === 0
+                  hoverEnabled: true
+                  onClicked: root.deleteWorkspace(root.contextWorkspaceId)
+                }
+              }
+
+              RowLayout {
+                visible: root.contextRenameMode
+                Layout.fillWidth: true
+                Layout.preferredHeight: Style.space(38)
+                spacing: Style.space(6)
+
+                Rectangle {
+                  Layout.fillWidth: true
+                  Layout.fillHeight: true
+                  radius: Style.cornerRadius
+                  color: cancelRenameMouse.containsMouse
+                    ? Util.alpha(Color.menu.text, 0.10) : "transparent"
+
+                  Text {
+                    anchors.fill: parent
+                    text: "Cancel"
+                    color: Color.menu.text
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.body
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                  }
+
+                  MouseArea {
+                    id: cancelRenameMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onClicked: root.cancelWorkspaceRename()
+                  }
+                }
+
+                Rectangle {
+                  Layout.fillWidth: true
+                  Layout.fillHeight: true
+                  radius: Style.cornerRadius
+                  color: saveRenameMouse.containsMouse
+                    ? Util.alpha(Color.accent, 0.34) : Util.alpha(Color.accent, 0.22)
+
+                  Text {
+                    anchors.fill: parent
+                    text: "Save"
+                    color: Color.menu.text
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.body
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                  }
+
+                  MouseArea {
+                    id: saveRenameMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onClicked: root.commitWorkspaceRename()
+                  }
+                }
               }
             }
           }

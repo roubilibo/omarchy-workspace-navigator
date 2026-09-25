@@ -16,6 +16,85 @@ function toplevelAddress(toplevel) {
   return normalizedAddress(toplevel.address || (ipc && ipc.address))
 }
 
+function altTabFocusRank(toplevel) {
+  var ipc = toplevel && toplevel.lastIpcObject
+  var rank = ipc && ipc.focusHistoryID !== undefined
+    ? Number(ipc.focusHistoryID) : -1
+  return isFinite(rank) && rank >= 0 ? rank : 2147483647
+}
+
+function sortAltTabByRecency(toplevels, activeAddress, focusHistory) {
+  var values = toplevels || []
+  var active = normalizedAddress(activeAddress)
+  var history = focusHistory || []
+  var historyRanks = {}
+  for (var h = 0; h < history.length; h++) {
+    var remembered = normalizedAddress(history[h])
+    if (remembered && historyRanks[remembered] === undefined)
+      historyRanks[remembered] = h
+  }
+
+  var ranked = []
+  for (var i = 0; i < values.length; i++) {
+    var address = toplevelAddress(values[i])
+    var rank = address === active ? -1
+      : (historyRanks[address] !== undefined
+        ? historyRanks[address] : history.length + altTabFocusRank(values[i]))
+    ranked.push({ toplevel: values[i], rank: rank, order: i })
+  }
+  ranked.sort(function(left, right) {
+    return left.rank - right.rank || left.order - right.order
+  })
+  var result = []
+  for (var n = 0; n < ranked.length; n++) result.push(ranked[n].toplevel)
+  return result
+}
+
+function reconcileAltTabCandidates(current, available, selectedAddress, selectedIndex,
+                                   includeNew) {
+  var latest = available || []
+  var byAddress = {}
+  var availableOrder = []
+  for (var i = 0; i < latest.length; i++) {
+    var address = toplevelAddress(latest[i])
+    if (!address || byAddress[address]) continue
+    byAddress[address] = latest[i]
+    availableOrder.push(address)
+  }
+
+  var candidates = []
+  var seen = {}
+  var previous = current || []
+  for (var j = 0; j < previous.length; j++) {
+    var oldAddress = toplevelAddress(previous[j])
+    if (!oldAddress || !byAddress[oldAddress] || seen[oldAddress]) continue
+    candidates.push(byAddress[oldAddress])
+    seen[oldAddress] = true
+  }
+  // An Alt+Tab session is a snapshot. Callers may explicitly opt into adding
+  // windows that appeared after it opened, but the normal switcher only
+  // replaces surviving delegates and removes closed ones.
+  if (includeNew !== false) {
+    for (var k = 0; k < availableOrder.length; k++) {
+      var newAddress = availableOrder[k]
+      if (seen[newAddress]) continue
+      candidates.push(byAddress[newAddress])
+    }
+  }
+
+  var selected = normalizedAddress(selectedAddress)
+  var index = -1
+  for (var n = 0; n < candidates.length; n++) {
+    if (toplevelAddress(candidates[n]) === selected) {
+      index = n
+      break
+    }
+  }
+  if (index < 0 && candidates.length > 0)
+    index = Math.min(Math.max(0, Number(selectedIndex) || 0), candidates.length - 1)
+  return { candidates: candidates, index: index }
+}
+
 function groupAddresses(toplevel) {
   var ipc = toplevel && toplevel.lastIpcObject
   var grouped = ipc && ipc.grouped && typeof ipc.grouped.length === "number"
