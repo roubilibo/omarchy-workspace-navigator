@@ -43,6 +43,8 @@ Item {
   property int pendingWorkspaceCreateId: -1
   property int pendingWorkspacePersistId: -1
   property int pendingWorkspaceUnpersistId: -1
+  property int pendingWorkspaceDeleteId: -1
+  property var menuPersistentWorkspaceIds: []
   property var createdWorkspaceIds: []
   property int currentPage: 0
   property var workspaceScroller: null
@@ -836,10 +838,6 @@ Item {
     root.contextRenameText = root.workspaceName(
       root.contextWorkspace(), root.contextWorkspaceId)
     root.contextRenameMode = true
-    Qt.callLater(function() {
-      workspaceRenameInput.forceActiveFocus()
-      workspaceRenameInput.selectAll()
-    })
   }
 
   function cancelWorkspaceRename() {
@@ -856,7 +854,7 @@ Item {
   }
 
   function commitWorkspaceRename() {
-    var name = root.luaString(workspaceRenameInput.text).trim()
+    var name = root.luaString(root.contextRenameText).trim()
     if (name === "") return
     var id = root.positiveWorkspaceId(root.contextWorkspaceId)
     if (id < 1) return
@@ -881,6 +879,25 @@ Item {
     root.pendingWorkspacePersistId = id
     root.closeWorkspaceContext()
     workspacePersistProcess.running = true
+  }
+
+  function toggleWorkspacePersistence() {
+    var id = root.positiveWorkspaceId(root.contextWorkspaceId)
+    if (id < 1) return
+    if (!root.isMenuPersistentWorkspace(id)) {
+      root.makeWorkspacePersistent()
+      return
+    }
+    if (workspaceUnpersistProcess.running) return
+    root.pendingWorkspaceUnpersistId = id
+    root.pendingWorkspaceDeleteId = -1
+    root.closeWorkspaceContext()
+    workspaceUnpersistProcess.running = true
+  }
+
+  function isMenuPersistentWorkspace(id) {
+    return root.menuPersistentWorkspaceIds.indexOf(
+      root.positiveWorkspaceId(id)) >= 0
   }
 
   function moveSelectedWindowToContext() {
@@ -988,9 +1005,11 @@ Item {
     try {
       Hyprland.dispatch("destroyworkspace " + String(id))
       root.pendingWorkspaceUnpersistId = id
+      root.pendingWorkspaceDeleteId = id
       workspaceUnpersistProcess.running = true
     } catch (e) {
       root.pendingWorkspaceUnpersistId = -1
+      root.pendingWorkspaceDeleteId = -1
       console.warn("workspace overview: could not delete workspace", workspaceId, e)
     }
   }
@@ -1021,6 +1040,8 @@ Item {
       console.warn("workspace overview: workspace is not empty", workspaceId)
       return
     }
+
+    root.closeWorkspaceContext()
 
     // Hyprland cannot destroy the currently active workspace. Move to the
     // first default workspace and defer the destroy until its event arrives.
@@ -1384,8 +1405,12 @@ Item {
       if (exitCode !== 0)
         console.warn("workspace overview: could not make workspace persistent",
           workspaceId, "hyprctl exited with", exitCode)
-      else
+      else {
+        var persistentIds = root.menuPersistentWorkspaceIds.slice()
+        if (persistentIds.indexOf(workspaceId) < 0) persistentIds.push(workspaceId)
+        root.menuPersistentWorkspaceIds = persistentIds
         root.workspaceRevision += 1
+      }
     }
   }
 
@@ -1396,11 +1421,20 @@ Item {
         + "\", persistent = false })"]
     onExited: function(exitCode) {
       var workspaceId = root.pendingWorkspaceUnpersistId
+      var deleteWorkspaceId = root.pendingWorkspaceDeleteId
       root.pendingWorkspaceUnpersistId = -1
+      root.pendingWorkspaceDeleteId = -1
       if (exitCode !== 0)
         console.warn("workspace overview: could not clear workspace persistence",
           workspaceId, "hyprctl exited with", exitCode)
-      root.finishWorkspaceDelete(workspaceId)
+      else {
+        var persistentIds = root.menuPersistentWorkspaceIds.slice()
+        var index = persistentIds.indexOf(workspaceId)
+        if (index >= 0) persistentIds.splice(index, 1)
+        root.menuPersistentWorkspaceIds = persistentIds
+      }
+      if (deleteWorkspaceId > 0) root.finishWorkspaceDelete(deleteWorkspaceId)
+      else if (exitCode === 0) root.workspaceRevision += 1
     }
   }
 
@@ -2155,12 +2189,19 @@ Item {
                   anchors.leftMargin: Style.space(10)
                   anchors.rightMargin: Style.space(10)
                   text: root.contextRenameText
+                  onTextEdited: root.contextRenameText = text
                   color: Color.menu.text
                   font.family: Style.font.family
                   font.pixelSize: Style.font.body
                   verticalAlignment: TextInput.AlignVCenter
                   selectByMouse: true
                   clip: true
+                  onVisibleChanged: {
+                    if (visible) Qt.callLater(function() {
+                      workspaceRenameInput.forceActiveFocus()
+                      workspaceRenameInput.selectAll()
+                    })
+                  }
                   Keys.onReturnPressed: root.commitWorkspaceRename()
                   Keys.onEscapePressed: root.cancelWorkspaceRename()
                 }
@@ -2287,7 +2328,8 @@ Item {
                 Text {
                   anchors.fill: parent
                   anchors.leftMargin: Style.space(10)
-                  text: "Make persistent"
+                  text: root.isMenuPersistentWorkspace(root.contextWorkspaceId)
+                    ? "Remove persistence" : "Make persistent"
                   color: Color.menu.text
                   font.family: Style.font.family
                   font.pixelSize: Style.font.body
@@ -2298,7 +2340,7 @@ Item {
                   id: persistentWorkspaceMouse
                   anchors.fill: parent
                   hoverEnabled: true
-                  onClicked: root.makeWorkspacePersistent()
+                  onClicked: root.toggleWorkspacePersistence()
                 }
               }
 
