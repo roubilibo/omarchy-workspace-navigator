@@ -68,30 +68,29 @@ omarchy plugin add https://github.com/roubilibo/omarchy-workspace-navigator.git 
 
 ### Install keyboard shortcuts
 
-After installing the plugin, run its binding installer once:
+Add this small loader block to the end of
+`~/.config/hypr/bindings.lua`:
 
-```bash
-~/.config/omarchy/plugins/roubilibo.workspace-navigator/install-bindings.sh
+```lua
+-- BEGIN roubilibo.workspace-navigator managed keybindings
+do
+  local navigator = os.getenv("HOME") .. "/.config/omarchy/plugins/roubilibo.workspace-navigator/hypr/workspace-navigator.lua"
+  local file = io.open(navigator, "r")
+  if file then
+    file:close()
+    pcall(dofile, navigator)
+  end
+end
+-- END roubilibo.workspace-navigator managed keybindings
 ```
 
-It installs `SUPER+TAB`, `ALT+TAB`, `ALT+SHIFT+TAB`, and the modal submap used
-while the navigator is open. The installer keeps a managed block in
-`~/.config/hypr/bindings.lua`, writes it atomically, makes a timestamped backup,
-and reloads Hyprland. It recognizes this plugin's previous manual bindings; if
-another binding uses one of these shortcuts, it stops without changing the
-file so you can resolve the conflict yourself.
-
-Run the installer again to update its managed block. To remove only that
-block, run:
+The actual bindings live in the plugin at `hypr/workspace-navigator.lua`, while
+your Hyprland config contains only this loader. Reload Hyprland after adding the
+block or updating the plugin:
 
 ```bash
-~/.config/omarchy/plugins/roubilibo.workspace-navigator/install-bindings.sh --remove
+hyprctl reload
 ```
-
-The shortcuts live in your Hyprland config, outside the plugin checkout, so
-they remain active after `omarchy plugin update`. Omarchy's plugin updater
-does not execute scripts shipped by plugins; no post-update script is needed
-for normal updates because these shortcut commands remain stable.
 
 The plugin can also be opened directly without a keybinding:
 
