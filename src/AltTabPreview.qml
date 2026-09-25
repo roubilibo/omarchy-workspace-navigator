@@ -70,11 +70,11 @@ Rectangle {
   }
 
   radius: Style.cornerRadius
-  color: Util.alpha(Color.background, 0.58)
+  color: Util.alpha(Color.menu.background, 0.82)
   // Windows-style Alt+Tab selection: a clear accent outline kept inside the
   // card, so it remains visible without scaling beyond the clipped viewport.
-  border.width: root.selected ? 2 : 1
-  border.color: root.selected ? Color.accent : Util.alpha(Color.menu.border, 0.28)
+  border.width: root.selected ? Math.max(2, Style.focusBorderWidth) : Style.normalBorderWidth
+  border.color: root.selected ? Color.accent : Util.alpha(Color.menu.border, 0.42)
   clip: true
 
   Item {
@@ -116,8 +116,8 @@ Rectangle {
       anchors.bottom: parent.bottom
       height: root.metadataHeight
       color: root.selected
-        ? Util.alpha(Color.accent, 0.18)
-        : Util.alpha(Color.background, 0.84)
+        ? Style.selectedFillFor(Color.menu.text, Color.accent)
+        : Util.alpha(Color.menu.background, 0.96)
 
       Image {
         id: appIcon

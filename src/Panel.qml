@@ -1542,9 +1542,9 @@ Item {
         Rectangle {
           anchors.fill: parent
           visible: root.opened && !root.settingsMode && !root.altTabOpen
-          // Mica-like material: a soft theme-tinted veil over a broad backdrop
-          // blur, rather than the near-opaque flat scrim used previously.
-          color: Util.alpha(Color.background, root.blurEnabled ? 0.78 : 0.92)
+          // Use Omarchy's menu scrim so the overview follows the active theme
+          // and keeps a consistent amount of desktop context visible.
+          color: Color.menu.scrim
 
           MouseArea {
             anchors.fill: parent
@@ -1669,7 +1669,7 @@ Item {
             Text {
               Layout.fillWidth: true
               text: "Workspace overview"
-              color: Color.foreground
+              color: Color.menu.text
               font.family: Style.font.family
               font.pixelSize: Style.font.title
               font.bold: true
@@ -1681,7 +1681,7 @@ Item {
               text: root.pageCountFor(root.workspaceEntries(root.workspaceRevision).length) > 1
                 ? "Swipe horizontally for additional workspaces  •  Click a card to enter"
                 : "Click a card to enter  •  Click a thumbnail to focus  •  Right-click for actions"
-              color: Util.alpha(Color.foreground, 0.65)
+              color: Util.alpha(Color.menu.text, 0.65)
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
               horizontalAlignment: Text.AlignHCenter
@@ -1696,7 +1696,7 @@ Item {
               radius: Style.cornerRadius
               color: Util.alpha(Color.menu.background, 0.82)
               border.width: 1
-              border.color: Util.alpha(Color.menu.border, 0.28)
+              border.color: Util.alpha(Color.menu.border, 0.42)
 
               Text {
                 anchors.fill: parent
@@ -1937,7 +1937,7 @@ Item {
                   + String(root.pageCountFor(root.workspaceEntries(root.workspaceRevision).length))
                   + "    •    swipe right for previous page    •    ?: show/hide shortcuts"
                 : "Click card: enter    Click thumbnail: focus    Left-drag: move/swap    Right-click: actions    ?: shortcuts"
-              color: Util.alpha(Color.foreground, 0.50)
+              color: Util.alpha(Color.menu.text, 0.58)
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
               horizontalAlignment: Text.AlignHCenter
@@ -1958,7 +1958,7 @@ Item {
             radius: Style.cornerRadius
             color: Color.menu.background
             border.width: 1
-            border.color: Util.alpha(Color.menu.border, 0.48)
+            border.color: Util.alpha(Color.menu.border, 0.62)
             // This is the maximum width of a landscape preview. Individual
             // cards derive their width from their own window ratio below, so
             // portrait windows are never forced into a cropped landscape box.
@@ -2050,7 +2050,7 @@ Item {
             radius: Style.cornerRadius
             color: Color.menu.background
             border.width: 1
-            border.color: Util.alpha(Color.menu.border, 0.35)
+            border.color: Util.alpha(Color.menu.border, 0.52)
 
             ColumnLayout {
               id: settingsColumn
@@ -2142,7 +2142,7 @@ Item {
             radius: Style.cornerRadius
             color: Color.menu.background
             border.width: 1
-            border.color: Util.alpha(Color.menu.border, 0.42)
+            border.color: Util.alpha(Color.menu.border, 0.58)
 
             // Keep clicks inside the menu from reaching the overview scrim.
             MouseArea {

@@ -13,6 +13,6 @@
   ],
   "keepLoaded": true,
   "entryPoints": {
-    "panel": "Panel.qml"
+    "panel": "src/Panel.qml"
   }
 }

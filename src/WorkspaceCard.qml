@@ -61,7 +61,7 @@ BorderSurface {
       return Border.flat(Color.accent, root.activeBorderWidth)
     if (root.keyboardSelected)
       return Border.flat(Util.alpha(Color.accent, 0.45), root.normalBorderWidth)
-    return Border.flat(Util.alpha(Color.menu.border, 0.14), root.normalBorderWidth)
+    return Border.flat(Util.alpha(Color.menu.border, 0.34), root.normalBorderWidth)
   }
 
   signal workspaceActivated()
@@ -89,7 +89,7 @@ BorderSurface {
   color: root.occupied || root.focused
     ? Color.menu.background : (root.addWorkspace
       ? Util.alpha(Color.accent, 0.10)
-      : Util.alpha(Color.menu.background, 0.72))
+      : Util.alpha(Color.menu.background, 0.90))
   borderSpec: root.cardBorderSpec
   clip: true
 
@@ -252,7 +252,7 @@ BorderSurface {
     height: badgeLabel.implicitHeight + Style.space(8)
     radius: height / 2
     color: root.focused ? Color.accent
-      : (root.keyboardSelected ? Util.alpha(Color.menu.text, 0.18)
+      : (root.keyboardSelected ? Style.selectedFillFor(Color.menu.text, Color.accent)
         : Util.alpha(Color.menu.background, 0.72))
 
     Text {

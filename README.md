@@ -84,9 +84,11 @@ end
 -- END roubilibo.workspace-navigator managed keybindings
 ```
 
-The actual bindings live in the plugin at `hypr/workspace-navigator.lua`, while
-your Hyprland config contains only this loader. Reload Hyprland after adding the
-block or updating the plugin:
+The Omarchy plugin's QML and JavaScript sources are in `src/`; the Hyprland
+binding source is in `hypr/`, and standalone helper scripts belong in `bin/`.
+There are currently no standalone helper scripts in this plugin. Your Hyprland
+config contains only this loader. Reload Hyprland after adding the block or
+updating the plugin:
 
 ```bash
 hyprctl reload
