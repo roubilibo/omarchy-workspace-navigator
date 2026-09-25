@@ -1202,8 +1202,8 @@ Item {
       return
     }
     try {
-      Hyprland.dispatch("workspaceNavigatorSetModal("
-        + (shouldBeActive ? "true" : "false") + ")")
+      var submap = shouldBeActive ? "workspace_navigator" : "reset"
+      Hyprland.dispatch('hl.dsp.submap("' + submap + '")')
       root.modalInputModeActive = shouldBeActive
     } catch (e) {
       console.warn("workspace navigator: could not change modal input mode", e)
