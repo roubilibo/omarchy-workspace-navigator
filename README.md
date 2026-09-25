@@ -20,6 +20,7 @@ https://github.com/user-attachments/assets/05c1dcf1-332a-4b1e-b2d7-3017d8340ca5
 - Create and delete empty workspaces above workspace 8.
 - Alt+Tab switcher with live window previews.
 - Alt+Tab previews preserve each window's original aspect ratio.
+- Alt+Tab cards adapt to the display, with the bottom row holding the larger share up to 10 windows; larger sets wrap into a vertically scrollable grid.
 - Alt+Tab scope can be limited to the current workspace or include all workspaces.
 - Keyboard navigation with arrows, `H/J/K/L`, `Tab`, and `Enter`.
 

@@ -71,10 +71,8 @@ Rectangle {
 
   radius: Style.cornerRadius
   color: Util.alpha(Color.menu.background, 0.82)
-  // Windows-style Alt+Tab selection: a clear accent outline kept inside the
-  // card, so it remains visible without scaling beyond the clipped viewport.
-  border.width: root.selected ? Math.max(2, Style.focusBorderWidth) : Style.normalBorderWidth
-  border.color: root.selected ? Color.accent : Util.alpha(Color.menu.border, 0.42)
+  border.width: Style.normalBorderWidth
+  border.color: Util.alpha(Color.menu.border, 0.42)
   clip: true
 
   Item {
@@ -115,9 +113,7 @@ Rectangle {
       anchors.right: parent.right
       anchors.bottom: parent.bottom
       height: root.metadataHeight
-      color: root.selected
-        ? Style.selectedFillFor(Color.menu.text, Color.accent)
-        : Util.alpha(Color.menu.background, 0.96)
+      color: Util.alpha(Color.menu.background, 0.96)
 
       Image {
         id: appIcon
@@ -162,6 +158,16 @@ Rectangle {
         elide: Text.ElideRight
       }
     }
+  }
+
+  // Draw the focus frame above the thumbnail and caption so selection
+  // surrounds the complete window card instead of coloring only its footer.
+  Rectangle {
+    anchors.fill: parent
+    radius: root.radius
+    color: "transparent"
+    border.width: root.selected ? Math.max(2, Style.focusBorderWidth) : 0
+    border.color: Color.accent
   }
 
   TapHandler {
