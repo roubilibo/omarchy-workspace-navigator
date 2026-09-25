@@ -3,8 +3,8 @@ import Quickshell
 import Quickshell.Hyprland
 import qs.Commons
 import qs.Ui
-import "WindowGeometry.js" as WindowGeometry
-import "WindowModel.js" as WindowModel
+import "../lib/WindowGeometry.js" as WindowGeometry
+import "../lib/WindowModel.js" as WindowModel
 
 BorderSurface {
   id: root

@@ -2,7 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Wayland
 import qs.Commons
-import "WindowModel.js" as WindowModel
+import "../lib/WindowModel.js" as WindowModel
 
 // A compositor-backed thumbnail. The tiny Drag source is deliberate: it lets
 // a DragHandler keep the thumbnail in place while DropArea receives the drag.

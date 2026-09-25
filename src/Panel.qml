@@ -6,7 +6,8 @@ import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
-import "WindowModel.js" as WindowModel
+import "components"
+import "lib/WindowModel.js" as WindowModel
 
 // Omarchy Shell workspace overview.
 //
@@ -63,8 +64,6 @@ Item {
   property var altTabClosedAddresses: ({})
   property string altTabDeferredFocusAddress: ""
   property string altTabScope: "workspace"
-  property var altTabScroller: null
-  property var altTabPreviewRepeater: null
 
   onAltTabOpenChanged: {
     root.syncModalInputMode()
@@ -694,36 +693,8 @@ Item {
     return name === "" ? "WS " + String(id) : name
   }
 
-  function altTabPreviewHeight() {
-    var scroller = root.altTabScroller
-    return scroller
-      ? Math.max(1, Math.min(Style.space(190),
-          scroller.height - Style.space(64)))
-      : Style.space(160)
-  }
-
   function ensureAltTabSelectionVisible() {
-    var scroller = root.altTabScroller
-    var repeater = root.altTabPreviewRepeater
-    if (!root.altTabOpen || root.altTabIndex < 0 || !scroller || !repeater)
-      return
-    var item = repeater.itemAt(root.altTabIndex)
-    if (!item) {
-      Qt.callLater(root.ensureAltTabSelectionVisible)
-      return
-    }
-
-    var left = item.mapToItem(scroller.contentItem, 0, 0).x
-    var right = left + item.width
-    var viewLeft = scroller.contentX
-    var viewRight = viewLeft + scroller.width
-    if (left < viewLeft) {
-      scroller.contentX = Math.max(0, left)
-    } else if (right > viewRight) {
-      scroller.contentX = Math.min(
-        Math.max(0, scroller.contentWidth - scroller.width),
-        right - scroller.width)
-    }
+    altTabOverlay.ensureSelectionVisible(root.altTabIndex)
   }
 
   function altTabStep(reverse) {
@@ -1944,189 +1915,26 @@ Item {
             }
           }
 
-          Rectangle {
+          AltTabOverlay {
             id: altTabOverlay
-            visible: root.altTabOpen
-            z: 20
-            anchors.centerIn: parent
-            width: Math.min(parent.width - Style.space(48),
-              Math.max(Style.space(420),
-                altTabRow.implicitWidth + Style.space(48)))
-            // The popup follows the card row's natural width. Its height is
-            // independent of the number of windows.
-            height: Math.min(parent.height - Style.space(48), Style.space(320))
-            radius: Style.cornerRadius
-            color: Color.menu.background
-            border.width: 1
-            border.color: Util.alpha(Color.menu.border, 0.62)
-            // This is the maximum width of a landscape preview. Individual
-            // cards derive their width from their own window ratio below, so
-            // portrait windows are never forced into a cropped landscape box.
-            property real previewWidth: Style.space(240)
-
-            ColumnLayout {
-              anchors.fill: parent
-              anchors.margins: Style.space(24)
-              spacing: Style.space(12)
-
-              RowLayout {
-                Layout.fillWidth: true
-
-                Text {
-                  Layout.fillWidth: true
-                  text: "Alt+Tab"
-                  color: Color.menu.text
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.title
-                  font.bold: true
-                }
-
-                Text {
-                  text: root.altTabScope === "all" ? "All workspaces" : "Current workspace"
-                  color: Util.alpha(Color.menu.text, 0.68)
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.bodySmall
-                }
-              }
-
-              Flickable {
-                id: altTabFlickable
-                Component.onCompleted: root.altTabScroller = altTabFlickable
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                clip: true
-                contentWidth: Math.max(width, altTabRow.width)
-                contentHeight: height
-                flickableDirection: Flickable.HorizontalFlick
-                boundsBehavior: Flickable.StopAtBounds
-
-                Row {
-                  id: altTabRow
-                  x: Math.max(0, (altTabFlickable.width - width) / 2)
-                  height: altTabFlickable.height
-                  spacing: Style.space(10)
-
-                  Repeater {
-                    id: altTabRepeater
-                    Component.onCompleted: root.altTabPreviewRepeater = altTabRepeater
-                    model: root.altTabCandidates
-
-                    delegate: AltTabPreview {
-                      required property var modelData
-                      required property int index
-                      // Reserve the caption area, then derive the card width
-                      // from the source geometry. This makes every preview
-                      // preserve the real window shape, even with mixed
-                      // landscape and portrait clients.
-                      readonly property real maxPreviewHeight:
-                        root.altTabPreviewHeight()
-                      width: Math.min(
-                        altTabOverlay.previewWidth,
-                        maxPreviewHeight * sourceWidth
-                          / Math.max(1, sourceHeight))
-                      height: width * sourceHeight
-                        / Math.max(1, sourceWidth) + Style.space(64)
-                      y: (altTabFlickable.height - height) / 2
-                      toplevel: modelData
-                      selected: index === root.altTabIndex
-                      workspaceLabel: root.altTabWorkspaceLabel(modelData)
-                      onActivated: {
-                        root.altTabIndex = index
-                        root.altTabCommit()
-                      }
-                    }
-                  }
-                }
-              }
-            }
+            opened: root.altTabOpen
+            scope: root.altTabScope
+            candidates: root.altTabCandidates
+            selectedIndex: root.altTabIndex
+            workspaceLabelFor: root.altTabWorkspaceLabel
+            onSelectionRequested: function(index) { root.altTabIndex = index }
+            onCommitRequested: root.altTabCommit()
           }
 
-          Rectangle {
-            visible: root.settingsMode
-            z: 10
-            anchors.centerIn: parent
-            width: Math.min(parent.width - Style.space(48), Style.space(560))
-            height: settingsColumn.implicitHeight + Style.space(48)
-            radius: Style.cornerRadius
-            color: Color.menu.background
-            border.width: 1
-            border.color: Util.alpha(Color.menu.border, 0.52)
-
-            ColumnLayout {
-              id: settingsColumn
-              anchors.fill: parent
-              anchors.margins: Style.space(24)
-              spacing: Style.space(12)
-
-              Text {
-                Layout.fillWidth: true
-                text: "Workspace Navigator Settings"
-                color: Color.menu.text
-                font.family: Style.font.family
-                font.pixelSize: Style.font.title
-                font.bold: true
-                horizontalAlignment: Text.AlignHCenter
-              }
-
-              Text {
-                Layout.fillWidth: true
-                text: "Enable optional workspace navigation behaviors."
-                color: Util.alpha(Color.menu.text, 0.70)
-                font.family: Style.font.family
-                font.pixelSize: Style.font.bodySmall
-                horizontalAlignment: Text.AlignHCenter
-                wrapMode: Text.WordWrap
-              }
-
-              Repeater {
-                model: root.settingsOptions
-
-                delegate: Toggle {
-                  required property var modelData
-                  required property int index
-                  Layout.fillWidth: true
-                  label: modelData.label
-                  description: modelData.description
-                  hasCursor: root.settingsSelection === index
-                  checked: modelData.kind === "flick"
-                    ? root.flickBehavior === "kinetic"
-                    : (modelData.kind === "altTab"
-                      ? root.altTabScope === "all" : root.blurEnabled)
-                  onClicked: root.toggleSettingsOption(index)
-                }
-              }
-
-              Text {
-                Layout.fillWidth: true
-                text: "Changes are saved automatically. Press Esc to close."
-                color: Util.alpha(Color.menu.text, 0.52)
-                font.family: Style.font.family
-                font.pixelSize: Style.font.bodySmall
-                horizontalAlignment: Text.AlignHCenter
-              }
-
-              Rectangle {
-                Layout.alignment: Qt.AlignHCenter
-                implicitWidth: Style.space(110)
-                implicitHeight: Style.space(36)
-                radius: height / 2
-                color: Util.alpha(Color.accent, 0.22)
-                border.width: 1
-                border.color: Util.alpha(Color.accent, 0.70)
-
-                Text {
-                  anchors.fill: parent
-                  text: "Close"
-                  color: Color.menu.text
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.bodySmall
-                  horizontalAlignment: Text.AlignHCenter
-                  verticalAlignment: Text.AlignVCenter
-                }
-
-                TapHandler { onTapped: root.dismiss() }
-              }
-            }
+          SettingsDialog {
+            opened: root.settingsMode
+            options: root.settingsOptions
+            selectedIndex: root.settingsSelection
+            flickBehavior: root.flickBehavior
+            altTabScope: root.altTabScope
+            blurEnabled: root.blurEnabled
+            onToggleRequested: function(index) { root.toggleSettingsOption(index) }
+            onDismissRequested: root.dismiss()
           }
 
           Rectangle {
