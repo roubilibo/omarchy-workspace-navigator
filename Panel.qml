@@ -70,7 +70,10 @@ Item {
     root.syncModalInputMode()
     if (root.altTabOpen) Qt.callLater(root.ensureAltTabSelectionVisible)
   }
-  onOpenedChanged: root.syncModalInputMode()
+  onOpenedChanged: {
+    root.syncModalInputMode()
+    if (!root.opened) root.closeWorkspaceContext()
+  }
   onAltTabIndexChanged: {
     if (root.altTabOpen) Qt.callLater(root.ensureAltTabSelectionVisible)
   }
@@ -1163,6 +1166,7 @@ Item {
       root.altTabCancel()
       return
     }
+    root.closeWorkspaceContext()
     root.altTabCancel()
     root.settingsMode = payload.mode === "settings"
     if (root.settingsMode)
@@ -1182,6 +1186,7 @@ Item {
   }
 
   function close() {
+    root.closeWorkspaceContext()
     root.opened = false
     root.settingsMode = false
     root.showKeybindHint = false
@@ -1210,6 +1215,7 @@ Item {
   }
 
   function dismiss() {
+    root.closeWorkspaceContext()
     if (root.shell && typeof root.shell.hide === "function")
       root.shell.hide((root.manifest && root.manifest.id) || "roubilibo.workspace-navigator")
     else
