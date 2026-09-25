@@ -31,7 +31,8 @@ CONFIG_DIR="${CONFIG_FILE%/*}"
 
 base_tmp="$(mktemp "$CONFIG_DIR/.workspace-navigator-base.XXXXXX")"
 new_tmp="$(mktemp "$CONFIG_DIR/.workspace-navigator-new.XXXXXX")"
-trap 'rm -f -- "$base_tmp" "$new_tmp"' EXIT
+legacy_tmp="$(mktemp "$CONFIG_DIR/.workspace-navigator-legacy.XXXXXX")"
+trap 'rm -f -- "$base_tmp" "$new_tmp" "$legacy_tmp"' EXIT
 
 begin_count="$(grep -Fxc -- "$BEGIN_MARKER" "$CONFIG_FILE" || true)"
 end_count="$(grep -Fxc -- "$END_MARKER" "$CONFIG_FILE" || true)"
@@ -64,6 +65,46 @@ else
   cp -- "$CONFIG_FILE" "$base_tmp"
 fi
 
+# Migrate the pre-installer block shipped in earlier versions of this plugin.
+# Its two comments delimit the exact navigator-only section; require its known
+# signatures before removing it so an edited or unrelated section is preserved.
+if [[ "$MODE" != "remove" ]]; then
+  if ! awk '
+    BEGIN { start = "-- While Workspace Navigator is open, route all keys to its exclusive layer"; finish = "-- Logitech MX Keys examples:" }
+    $0 == start {
+      starts++
+      if (inside) bad = 1
+      inside = 1
+      next
+    }
+    $0 == finish && inside {
+      ends++
+      inside = 0
+      print
+      next
+    }
+    inside {
+      if ($0 ~ /hl\.define_submap\("workspace_navigator"/) submap++
+      if ($0 ~ /Workspace Navigator: emergency exit modal input/) emergency++
+      if ($0 ~ /Workspace Navigator: next window/) next_window++
+      if ($0 ~ /Workspace Navigator: previous window/) previous_window++
+      if ($0 ~ /Workspace Navigator: focus selected window/) commit++
+      if ($0 ~ /omarchy-shell shell toggle roubilibo\.workspace-navigator/) toggle++
+      if ($0 ~ /omarchy-shell shell summon roubilibo\.workspace-navigator/) summon++
+      if ($0 ~ /omarchy-shell roubilibo\.workspace-navigator altTabCommit/) alt_commit++
+      next
+    }
+    { print }
+    END {
+      if (starts == 0 && ends == 0) exit 0
+      if (starts != 1 || ends != 1 || inside || bad || submap != 1 || emergency != 1 || next_window != 1 || previous_window != 1 || commit != 1 || toggle != 2 || summon != 2 || alt_commit != 1) exit 2
+    }
+  ' "$base_tmp" > "$legacy_tmp"; then
+    fail "legacy Workspace Navigator block is incomplete or modified; left $CONFIG_FILE unchanged"
+  fi
+  mv -- "$legacy_tmp" "$base_tmp"
+fi
+
 if [[ "$MODE" == "remove" ]]; then
   (( begin_count == 1 )) || {
     printf 'workspace-navigator: no managed keybinding block to remove\n'
@@ -92,20 +133,13 @@ else
   fi
 
   if grep -Fq 'hl.define_submap("workspace_navigator"' "$base_tmp"; then
-    if ! grep -Fq 'Workspace Navigator: emergency exit modal input' "$base_tmp" \
-      || ! grep -Fq 'omarchy-shell shell toggle roubilibo.workspace-navigator' "$base_tmp"; then
-      fail "workspace_navigator is already defined by unrelated config; left $CONFIG_FILE unchanged"
-    fi
-    define_submap=0
-  else
-    define_submap=1
+    fail "workspace_navigator is already defined outside the managed block; left $CONFIG_FILE unchanged"
   fi
 
   {
     cat -- "$base_tmp"
     printf '\n%s\n' "$BEGIN_MARKER"
-    if (( define_submap )); then
-      cat <<'LUA'
+    cat <<'LUA'
 hl.define_submap("workspace_navigator", function()
     hl.bind("CTRL + ALT + ESCAPE", function()
       hl.dispatch(hl.dsp.submap("reset"))
@@ -116,7 +150,6 @@ hl.define_submap("workspace_navigator", function()
     hl.bind("catchall", function() end, { non_consuming = true })
   end)
 LUA
-    fi
 
     cat <<'LUA'
 hl.unbind("SUPER + TAB")
