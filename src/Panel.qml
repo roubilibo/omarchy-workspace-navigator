@@ -509,6 +509,15 @@ Item {
           Hyprland.dispatch("focuswindow address:" + address)
         }
 
+        if (ipc && ipc.floating === true) {
+          if (Hyprland.usingLua) {
+            Hyprland.dispatch("hl.dsp.window.alter_zorder({ window = \"address:"
+              + address + "\", mode = \"top\" })")
+          } else {
+            Hyprland.dispatch("alterzorder top,address:" + address)
+          }
+        }
+
         // follow_mouse is a global Hyprland input option. It is already enabled
         // on this system, so follow the selected window by moving the pointer to
         // its center instead of changing the user's global input configuration.
