@@ -486,44 +486,49 @@ Item {
     if (!address) return
 
     root.altTabOpen = false
+    var workspace = toplevel && toplevel.workspace ? toplevel.workspace : null
+    var workspaceId = workspace ? root.positiveWorkspaceId(workspace.id) : -1
+    var focusedWorkspaceId = Hyprland.focusedWorkspace
+      ? root.positiveWorkspaceId(Hyprland.focusedWorkspace.id) : -1
+    var ipc = toplevel ? toplevel.lastIpcObject : null
+    var at = ipc && ipc.at && ipc.at.length >= 2 ? ipc.at : null
+    var size = ipc && ipc.size && ipc.size.length >= 2 ? ipc.size : null
 
-    try {
-      var workspace = toplevel && toplevel.workspace ? toplevel.workspace : null
-      var workspaceId = workspace ? root.positiveWorkspaceId(workspace.id) : -1
-      var focusedWorkspaceId = Hyprland.focusedWorkspace
-        ? root.positiveWorkspaceId(Hyprland.focusedWorkspace.id) : -1
-      if (workspaceId > 0 && workspaceId !== focusedWorkspaceId)
-        root.dispatchFocusWorkspace(workspaceId)
-
-      if (Hyprland.usingLua) {
-        Hyprland.dispatch("hl.dsp.focus({ window = \"address:" + address + "\" })")
-      } else {
-        Hyprland.dispatch("focuswindow address:" + address)
-      }
-
-      // follow_mouse is a global Hyprland input option. It is already enabled
-      // on this system, so follow the selected window by moving the pointer to
-      // its center instead of changing the user's global input configuration.
-      var ipc = toplevel ? toplevel.lastIpcObject : null
-      var at = ipc && ipc.at && ipc.at.length >= 2 ? ipc.at : null
-      var size = ipc && ipc.size && ipc.size.length >= 2 ? ipc.size : null
-      if (at && size) {
-        var x = Number(at[0]) + Number(size[0]) / 2
-        var y = Number(at[1]) + Number(size[1]) / 2
-        if (isFinite(x) && isFinite(y))
-          Hyprland.dispatch("hl.dsp.cursor.move({ x = " + String(Math.round(x))
-            + ", y = " + String(Math.round(y)) + " })")
-      } else if (Hyprland.usingLua) {
-        // Keep the follow behavior for clients whose IPC geometry is not yet
-        // exposed by Quickshell; corner 0 is only a fallback target.
-        Hyprland.dispatch("hl.dsp.cursor.move_to_corner({ window = \"address:"
-          + address + "\", corner = 0 })")
-      }
-      root.selectedToplevel = toplevel
-    } catch (e) {
-      console.warn("workspace overview: could not focus window", address, e)
-    }
+    // Hiding the layer surface can restore focus to the previously active
+    // client, so close it before sending focus to the selected window.
     root.dismiss()
+
+    Qt.callLater(function() {
+      try {
+        if (workspaceId > 0 && workspaceId !== focusedWorkspaceId)
+          root.dispatchFocusWorkspace(workspaceId)
+
+        if (Hyprland.usingLua) {
+          Hyprland.dispatch("hl.dsp.focus({ window = \"address:" + address + "\" })")
+        } else {
+          Hyprland.dispatch("focuswindow address:" + address)
+        }
+
+        // follow_mouse is a global Hyprland input option. It is already enabled
+        // on this system, so follow the selected window by moving the pointer to
+        // its center instead of changing the user's global input configuration.
+        if (at && size) {
+          var x = Number(at[0]) + Number(size[0]) / 2
+          var y = Number(at[1]) + Number(size[1]) / 2
+          if (isFinite(x) && isFinite(y))
+            Hyprland.dispatch("hl.dsp.cursor.move({ x = " + String(Math.round(x))
+              + ", y = " + String(Math.round(y)) + " })")
+        } else if (Hyprland.usingLua) {
+          // Keep the follow behavior for clients whose IPC geometry is not yet
+          // exposed by Quickshell; corner 0 is only a fallback target.
+          Hyprland.dispatch("hl.dsp.cursor.move_to_corner({ window = \"address:"
+            + address + "\", corner = 0 })")
+        }
+        root.selectedToplevel = toplevel
+      } catch (e) {
+        console.warn("workspace overview: could not focus window", address, e)
+      }
+    })
   }
 
   function rememberAltTabFocus(toplevel) {
