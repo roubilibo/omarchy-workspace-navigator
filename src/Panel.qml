@@ -55,6 +55,7 @@ Item {
   property bool altTabOpen: false
   property bool altTabOverlayVisible: false
   property bool altTabCommitPending: false
+  property bool altTabCommitHandled: false
   property bool modalInputModeActive: false
   property int altTabIndex: -1
   property var altTabCandidates: []
@@ -75,6 +76,7 @@ Item {
       altTabOverlayShowTimer.stop()
       root.altTabOverlayVisible = false
       root.clearPendingAltTabCommit()
+      root.altTabCommitHandled = true
     }
   }
   onAltTabOverlayVisibleChanged: {
@@ -752,6 +754,7 @@ Item {
       // compositor's toplevel enumeration order.
       root.altTabIndex = count === 1 ? 0
         : (reverse ? count - 1 : 1)
+      if (!root.altTabCommitPending) root.altTabCommitHandled = false
       root.altTabOpen = true
     } else {
       root.reconcileAltTabCandidates()
@@ -780,12 +783,14 @@ Item {
 
   function altTabCommit() {
     if (!root.altTabOpen) {
+      if (root.altTabCommitHandled || root.altTabCommitPending) return
       // The release binding can arrive before shell summon has opened the
       // first Alt+Tab step. Keep that release until the session is ready.
       root.altTabCommitPending = true
       altTabPendingStartTimer.restart()
       return
     }
+    root.altTabCommitHandled = true
     root.clearPendingAltTabCommit()
     root.reconcileAltTabCandidates()
     if (!root.altTabOpen) return
@@ -808,6 +813,7 @@ Item {
   }
 
   function closeAltTabSession(applyDeferredFocus) {
+    root.altTabCommitHandled = true
     root.clearPendingAltTabCommit()
     altTabRefreshTimer.stop()
     var deferred = root.altTabDeferredFocusAddress
@@ -1285,7 +1291,10 @@ Item {
     interval: 500
     repeat: false
     onTriggered: {
-      if (!root.altTabOpen) root.altTabCommitPending = false
+      if (!root.altTabOpen) {
+        root.altTabCommitPending = false
+        root.altTabCommitHandled = true
+      }
     }
   }
 
@@ -1627,6 +1636,12 @@ Item {
                        && (event.modifiers & Qt.MetaModifier)) {
               if (root.altTabOpen) root.altTabCancel()
               if (root.opened || !root.altTabOpen) root.dismiss()
+              event.accepted = true
+            } else if (root.altTabOpen
+                       && !(event.modifiers & Qt.AltModifier)) {
+              // The Alt release can arrive before this layer surface receives
+              // keyboard focus. A later Tab repeat then commits the session.
+              root.altTabCommit()
               event.accepted = true
             } else if (root.opened && !root.altTabOpen
                        && event.key === Qt.Key_Tab
