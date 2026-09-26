@@ -764,7 +764,10 @@ Item {
     root.selectedToplevel = root.altTabCandidates[root.altTabIndex] || null
     if (root.altTabCommitPending) {
       altTabPendingStartTimer.stop()
-      altTabPendingCommitTimer.restart()
+      // A held Tab key can keep repeating after Alt is released. Do not let
+      // those repeats postpone the queued release commit indefinitely.
+      if (!altTabPendingCommitTimer.running)
+        altTabPendingCommitTimer.start()
     }
     root.applyBlurState()
   }
