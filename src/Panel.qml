@@ -490,7 +490,10 @@ Item {
     try {
       var workspace = toplevel && toplevel.workspace ? toplevel.workspace : null
       var workspaceId = workspace ? root.positiveWorkspaceId(workspace.id) : -1
-      if (workspaceId > 0) root.dispatchFocusWorkspace(workspaceId)
+      var focusedWorkspaceId = Hyprland.focusedWorkspace
+        ? root.positiveWorkspaceId(Hyprland.focusedWorkspace.id) : -1
+      if (workspaceId > 0 && workspaceId !== focusedWorkspaceId)
+        root.dispatchFocusWorkspace(workspaceId)
 
       if (Hyprland.usingLua) {
         Hyprland.dispatch("hl.dsp.focus({ window = \"address:" + address + "\" })")
