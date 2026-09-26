@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "roubilibo.workspace-navigator",
   "name": "Workspace Navigator",
-  "version": "1.3.2",
+  "version": "2.1.0",
   "author": "roubilibo",
   "license": "MIT",
   "description": "A live workspace and window thumbnail overview for Omarchy Shell.",
