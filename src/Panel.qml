@@ -53,6 +53,7 @@ Item {
   property bool settingsMode: false
   property int settingsSelection: 0
   property bool altTabOpen: false
+  property bool altTabOverlayVisible: false
   property bool modalInputModeActive: false
   property int altTabIndex: -1
   property var altTabCandidates: []
@@ -67,14 +68,22 @@ Item {
 
   onAltTabOpenChanged: {
     root.syncModalInputMode()
-    if (root.altTabOpen) Qt.callLater(root.ensureAltTabSelectionVisible)
+    if (root.altTabOpen) {
+      altTabOverlayShowTimer.start()
+    } else {
+      altTabOverlayShowTimer.stop()
+      root.altTabOverlayVisible = false
+    }
+  }
+  onAltTabOverlayVisibleChanged: {
+    if (root.altTabOverlayVisible) Qt.callLater(root.ensureAltTabSelectionVisible)
   }
   onOpenedChanged: {
     root.syncModalInputMode()
     if (!root.opened) root.closeWorkspaceContext()
   }
   onAltTabIndexChanged: {
-    if (root.altTabOpen) Qt.callLater(root.ensureAltTabSelectionVisible)
+    if (root.altTabOverlayVisible) Qt.callLater(root.ensureAltTabSelectionVisible)
   }
 
   readonly property int minimumWorkspaceCount: 8
@@ -1240,6 +1249,15 @@ Item {
   }
 
   Timer {
+    id: altTabOverlayShowTimer
+    interval: 120
+    repeat: false
+    onTriggered: {
+      if (root.altTabOpen) root.altTabOverlayVisible = true
+    }
+  }
+
+  Timer {
     id: reorderRefreshTimer
     interval: 180
     repeat: false
@@ -1934,7 +1952,7 @@ Item {
 
           AltTabOverlay {
             id: altTabOverlay
-            opened: root.altTabOpen
+            opened: root.altTabOverlayVisible
             scope: root.altTabScope
             candidates: root.altTabCandidates
             selectedIndex: root.altTabIndex
