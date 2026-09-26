@@ -54,6 +54,7 @@ Item {
   property int settingsSelection: 0
   property bool altTabOpen: false
   property bool altTabOverlayVisible: false
+  property bool altTabCommitPending: false
   property bool modalInputModeActive: false
   property int altTabIndex: -1
   property var altTabCandidates: []
@@ -73,6 +74,7 @@ Item {
     } else {
       altTabOverlayShowTimer.stop()
       root.altTabOverlayVisible = false
+      root.clearPendingAltTabCommit()
     }
   }
   onAltTabOverlayVisibleChanged: {
@@ -760,11 +762,28 @@ Item {
         % candidateCount
     }
     root.selectedToplevel = root.altTabCandidates[root.altTabIndex] || null
+    if (root.altTabCommitPending) {
+      altTabPendingStartTimer.stop()
+      altTabPendingCommitTimer.restart()
+    }
     root.applyBlurState()
   }
 
+  function clearPendingAltTabCommit() {
+    root.altTabCommitPending = false
+    altTabPendingStartTimer.stop()
+    altTabPendingCommitTimer.stop()
+  }
+
   function altTabCommit() {
-    if (!root.altTabOpen) return
+    if (!root.altTabOpen) {
+      // The release binding can arrive before shell summon has opened the
+      // first Alt+Tab step. Keep that release until the session is ready.
+      root.altTabCommitPending = true
+      altTabPendingStartTimer.restart()
+      return
+    }
+    root.clearPendingAltTabCommit()
     root.reconcileAltTabCandidates()
     if (!root.altTabOpen) return
     var selected = root.altTabCandidates[root.altTabIndex]
@@ -786,6 +805,7 @@ Item {
   }
 
   function closeAltTabSession(applyDeferredFocus) {
+    root.clearPendingAltTabCommit()
     altTabRefreshTimer.stop()
     var deferred = root.altTabDeferredFocusAddress
     root.altTabDeferredFocusAddress = ""
@@ -1254,6 +1274,24 @@ Item {
     repeat: false
     onTriggered: {
       if (root.altTabOpen) root.altTabOverlayVisible = true
+    }
+  }
+
+  Timer {
+    id: altTabPendingStartTimer
+    interval: 500
+    repeat: false
+    onTriggered: {
+      if (!root.altTabOpen) root.altTabCommitPending = false
+    }
+  }
+
+  Timer {
+    id: altTabPendingCommitTimer
+    interval: 40
+    repeat: false
+    onTriggered: {
+      if (root.altTabCommitPending && root.altTabOpen) root.altTabCommit()
     }
   }
 

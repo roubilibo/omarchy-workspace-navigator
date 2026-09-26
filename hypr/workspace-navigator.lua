@@ -46,14 +46,25 @@ o.bind("SUPER + TAB", "Workspace Navigator",
 
 hl.unbind("ALT + TAB")
 hl.unbind("ALT + SHIFT + TAB")
-o.bind("ALT + TAB", "Workspace Navigator: next window",
-  [[omarchy-shell shell summon roubilibo.workspace-navigator '{"mode":"alt-tab-next"}']])
-o.bind("ALT + SHIFT + TAB", "Workspace Navigator: previous window",
-  [[omarchy-shell shell summon roubilibo.workspace-navigator '{"mode":"alt-tab-previous"}']])
+_G.__workspace_navigator_alt_tab_pending = false
+hl.bind("ALT + TAB", function()
+  _G.__workspace_navigator_alt_tab_pending = true
+  hl.exec_cmd([[omarchy-shell shell summon roubilibo.workspace-navigator '{"mode":"alt-tab-next"}']])
+end, { description = "Workspace Navigator: next window" })
+hl.bind("ALT + SHIFT + TAB", function()
+  _G.__workspace_navigator_alt_tab_pending = true
+  hl.exec_cmd([[omarchy-shell shell summon roubilibo.workspace-navigator '{"mode":"alt-tab-previous"}']])
+end, { description = "Workspace Navigator: previous window" })
 
 hl.unbind("ALT")
-o.bind("ALT", "Workspace Navigator: focus selected window",
-  [[omarchy-shell roubilibo.workspace-navigator altTabCommit]],
-  { release = true, submap_universal = true })
+hl.bind("ALT", function()
+  if not _G.__workspace_navigator_alt_tab_pending then return end
+  _G.__workspace_navigator_alt_tab_pending = false
+  hl.exec_cmd("omarchy-shell roubilibo.workspace-navigator altTabCommit")
+end, {
+  description = "Workspace Navigator: focus selected window",
+  release = true,
+  submap_universal = true,
+})
 
 return true
