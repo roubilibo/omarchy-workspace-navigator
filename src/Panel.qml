@@ -132,6 +132,13 @@ Item {
   ]
   readonly property string flickSettingsPath:
     Quickshell.env("HOME") + "/.local/state/omarchy/settings/workspace-navigator.json"
+  readonly property string safeConfigFileHelper:
+    Quickshell.env("HOME")
+    + "/.config/omarchy/plugins/roubilibo.workspace-navigator/bin/safe-config-file.py"
+  property string settingsWriteText: ""
+  property bool settingsWriteDirty: false
+  property string launcherMenuWriteText: ""
+  property bool launcherMenuWriteDirty: false
   readonly property string blurEvalCommand:
     'workspaceNavigatorBlurRule = workspaceNavigatorBlurRule or '
     + 'hl.layer_rule({ name = "workspace-navigator-blur", '
@@ -153,15 +160,6 @@ Item {
     '  "setup.workspace-navigator": {"icon":"󰒓","label":"Workspace Navigator",'
     + '"description":"Configure swipe behavior, Alt+Tab scope, and blur",'
     + '"action":"omarchy-shell roubilibo.workspace-navigator settings"}'
-  property bool launcherMenuRegistrationReady: false
-  property FileView flickSettingsFile: FileView {
-    path: root.flickSettingsPath
-    watchChanges: true
-    printErrors: false
-    onFileChanged: reload()
-    onLoaded: root.loadFlickSettings(text())
-  }
-
   function loadFlickSettings(raw) {
     try {
       var settings = JSON.parse(String(raw || "{}"))
@@ -176,11 +174,19 @@ Item {
   }
 
   function saveSettings() {
-    flickSettingsFile.setText(JSON.stringify({
+    root.settingsWriteText = JSON.stringify({
       flickBehavior: root.flickBehavior,
       altTabScope: root.altTabScope,
       blurEnabled: root.blurEnabled
-    }, null, 2) + "\n")
+    }, null, 2) + "\n"
+    root.settingsWriteDirty = true
+    if (!settingsWriteProcess.running) root.startSettingsWrite()
+  }
+
+  function startSettingsWrite() {
+    if (!root.settingsWriteDirty || settingsWriteProcess.running) return
+    root.settingsWriteDirty = false
+    settingsWriteProcess.running = true
   }
 
   function setFlickBehavior(value) {
@@ -255,12 +261,11 @@ Item {
   }
 
   function ensureLauncherMenuEntry(raw) {
-    if (!root.launcherMenuRegistrationReady) return
     var current = String(raw || "")
     if (/^\s*"setup\.workspace-navigator"\s*:/m.test(current)) return
 
     if (current.trim() === "") {
-      launcherMenuFile.setText("{\n" + root.launcherMenuEntryText + "\n}\n")
+      root.writeLauncherMenu("{\n" + root.launcherMenuEntryText + "\n}\n")
       return
     }
 
@@ -295,11 +300,24 @@ Item {
       lines[priorLine] += ","
 
     lines.splice(closingLine, 0, root.launcherMenuEntryText)
-    launcherMenuFile.setText(lines.join("\n"))
+    root.writeLauncherMenu(lines.join("\n"))
+  }
+
+  function writeLauncherMenu(contents) {
+    root.launcherMenuWriteText = String(contents)
+    root.launcherMenuWriteDirty = true
+    if (!launcherMenuWriteProcess.running) root.startLauncherMenuWrite()
+  }
+
+  function startLauncherMenuWrite() {
+    if (!root.launcherMenuWriteDirty || launcherMenuWriteProcess.running) return
+    root.launcherMenuWriteDirty = false
+    launcherMenuWriteProcess.running = true
   }
 
   Component.onCompleted: {
-    launcherMenuDirectoryProcess.running = true
+    settingsReadProcess.running = true
+    launcherMenuReadProcess.running = true
     root.rememberAltTabFocus(Hyprland.activeToplevel)
     root.applyBlurState()
   }
@@ -1413,26 +1431,50 @@ Item {
   }
 
   Process {
-    id: launcherMenuDirectoryProcess
-    command: ["mkdir", "-p", root.launcherMenuDirectory]
+    id: settingsReadProcess
+    command: ["python3", root.safeConfigFileHelper, "read",
+      root.flickSettingsPath, "16384"]
+    stdout: StdioCollector { id: settingsReadOutput; waitForEnd: true }
     onExited: function(exitCode) {
-      if (exitCode !== 0) {
-        console.warn("workspace overview: could not prepare omarchy menu extension", exitCode)
-        return
-      }
-      root.launcherMenuRegistrationReady = true
-      launcherMenuFile.reload()
+      if (exitCode === 0) root.loadFlickSettings(settingsReadOutput.text)
+      else if (exitCode !== 3)
+        console.warn("workspace overview: could not read settings safely", exitCode)
     }
   }
 
-  FileView {
-    id: launcherMenuFile
-    path: root.launcherMenuPath
-    printErrors: false
-    onLoaded: root.ensureLauncherMenuEntry(text())
-    onLoadFailed: {
-      if (root.launcherMenuRegistrationReady)
-        setText("{\n" + root.launcherMenuEntryText + "\n}\n")
+  Process {
+    id: settingsWriteProcess
+    command: ["python3", root.safeConfigFileHelper, "write",
+      root.flickSettingsPath, "16384", root.settingsWriteText]
+    onExited: function(exitCode) {
+      if (exitCode !== 0)
+        console.warn("workspace overview: could not save settings safely", exitCode)
+      if (root.settingsWriteDirty) root.startSettingsWrite()
+    }
+  }
+
+  Process {
+    id: launcherMenuReadProcess
+    command: ["python3", root.safeConfigFileHelper, "read",
+      root.launcherMenuPath, "65536"]
+    stdout: StdioCollector { id: launcherMenuReadOutput; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.ensureLauncherMenuEntry(launcherMenuReadOutput.text)
+      else if (exitCode === 3)
+        root.writeLauncherMenu("{\n" + root.launcherMenuEntryText + "\n}\n")
+      else
+        console.warn("workspace overview: could not read omarchy menu extension safely", exitCode)
+    }
+  }
+
+  Process {
+    id: launcherMenuWriteProcess
+    command: ["python3", root.safeConfigFileHelper, "write",
+      root.launcherMenuPath, "65536", root.launcherMenuWriteText]
+    onExited: function(exitCode) {
+      if (exitCode !== 0)
+        console.warn("workspace overview: could not update omarchy menu extension safely", exitCode)
+      if (root.launcherMenuWriteDirty) root.startLauncherMenuWrite()
     }
   }
 

@@ -87,10 +87,9 @@ end
 
 The source is organized by responsibility: `src/Panel.qml` coordinates plugin
 state, reusable QML UI lives in `src/components/`, and shared JavaScript logic
-lives in `src/lib/`. The Hyprland binding source is in `hypr/`, and standalone
-helper scripts belong in `bin/`. There are currently no standalone helper
-scripts in this plugin. Your Hyprland config contains only this loader. Reload
-Hyprland after adding the block or updating the plugin:
+lives in `src/lib/`. The Hyprland binding source is in `hypr/`, and the bounded,
+no-follow config-file helper is in `bin/`. Your Hyprland config contains only
+this loader. Reload Hyprland after adding the block or updating the plugin:
 
 ```bash
 hyprctl reload
