@@ -79,15 +79,9 @@ Item {
       root.altTabCommitHandled = true
     }
   }
-  onAltTabOverlayVisibleChanged: {
-    if (root.altTabOverlayVisible) Qt.callLater(root.ensureAltTabSelectionVisible)
-  }
   onOpenedChanged: {
     root.syncModalInputMode()
     if (!root.opened) root.closeWorkspaceContext()
-  }
-  onAltTabIndexChanged: {
-    if (root.altTabOverlayVisible) Qt.callLater(root.ensureAltTabSelectionVisible)
   }
 
   readonly property int minimumWorkspaceCount: 8
@@ -739,10 +733,6 @@ Item {
     var name = root.workspaceName(workspace, id)
     if (id < 1) return ""
     return name === "" ? "WS " + String(id) : name
-  }
-
-  function ensureAltTabSelectionVisible() {
-    altTabOverlay.ensureSelectionVisible(root.altTabIndex)
   }
 
   function altTabStep(reverse) {

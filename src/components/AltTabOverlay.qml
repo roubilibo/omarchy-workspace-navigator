@@ -11,6 +11,8 @@ Rectangle {
   property var candidates: []
   property int selectedIndex: -1
   property var workspaceLabelFor: null
+  property int pendingSelectionIndex: -1
+  property int selectionVisibilityAttempts: 0
   signal selectionRequested(int index)
   signal commitRequested()
 
@@ -113,13 +115,20 @@ Rectangle {
   }
 
   function ensureSelectionVisible(index) {
-    if (!root.opened || index < 0) return
+    // Keep this logic in the overlay component: Panel.qml creates the overlay
+    // inside a per-screen delegate, whose IDs are not visible to root.
+    if (!root.opened || index !== root.selectedIndex
+        || index < 0 || index >= root.candidateCount) return
     var item = previewRepeater.itemAt(index)
     if (!item) {
-      Qt.callLater(function() { root.ensureSelectionVisible(index) })
+      if (root.selectionVisibilityAttempts < 4) {
+        root.selectionVisibilityAttempts += 1
+        selectionVisibilityTimer.restart()
+      }
       return
     }
 
+    root.selectionVisibilityAttempts = 0
     var top = item.mapToItem(previewScroller.contentItem, 0, 0).y
     var bottom = top + item.height
     var viewTop = previewScroller.contentY
@@ -133,15 +142,34 @@ Rectangle {
     }
   }
 
+  function scheduleSelectionVisibility() {
+    if (!root.opened) {
+      selectionVisibilityTimer.stop()
+      root.pendingSelectionIndex = -1
+      root.selectionVisibilityAttempts = 0
+      return
+    }
+
+    root.pendingSelectionIndex = root.selectedIndex
+    root.selectionVisibilityAttempts = 0
+    selectionVisibilityTimer.restart()
+  }
+
   onOpenedChanged: {
-    if (root.opened) Qt.callLater(function() {
-      root.ensureSelectionVisible(root.selectedIndex)
-    })
+    root.scheduleSelectionVisibility()
   }
   onSelectedIndexChanged: {
-    if (root.opened) Qt.callLater(function() {
-      root.ensureSelectionVisible(root.selectedIndex)
-    })
+    root.scheduleSelectionVisibility()
+  }
+  onCandidatesChanged: {
+    root.scheduleSelectionVisibility()
+  }
+
+  Timer {
+    id: selectionVisibilityTimer
+    interval: 16
+    repeat: false
+    onTriggered: root.ensureSelectionVisible(root.pendingSelectionIndex)
   }
 
   ColumnLayout {
