@@ -24,14 +24,13 @@ https://github.com/user-attachments/assets/05c1dcf1-332a-4b1e-b2d7-3017d8340ca5
 - Alt+Tab scope can be limited to the current workspace or include all workspaces.
 - Keyboard navigation with arrows, `H/J/K/L`, `Tab`, and `Enter`.
 
-## Swipe settings
+## Settings
 
 After the plugin is enabled, it registers `Workspace Navigator` in
 `Omarchy Menu → Setup`. Open it to choose:
 
-- `Kinetic Swipe`: optional; when off, the default is Single Page.
 - `Alt+Tab: All Workspaces`: optional; when off, the default is Current Workspace.
-- `Overview Background Blur`: blur the desktop behind the navigator on demand.
+- `Background Blur`: blur the desktop behind the overview and Alt+Tab panel on demand.
 
 The settings page is a centered floating card. It does not show the overview
 scrim behind it.

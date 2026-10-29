@@ -8,6 +8,9 @@ Rectangle {
 
   property bool opened: false
   property string scope: "workspace"
+  property real availableWidth: 1
+  property real availableHeight: 1
+  property bool blurredBackground: false
   property var candidates: []
   property int selectedIndex: -1
   property var workspaceLabelFor: null
@@ -16,8 +19,8 @@ Rectangle {
   signal selectionRequested(int index)
   signal commitRequested()
 
-  readonly property real maxPopupWidth: Math.max(1, parent.width - Style.space(48))
-  readonly property real maxPopupHeight: Math.max(1, parent.height - Style.space(48))
+  readonly property real maxPopupWidth: Math.max(1, root.availableWidth - Style.space(48))
+  readonly property real maxPopupHeight: Math.max(1, root.availableHeight - Style.space(48))
   readonly property real cardGap: Style.space(12)
   readonly property real minCellWidth: Style.space(144)
   readonly property real maxCellWidth: Style.space(240)
@@ -58,7 +61,8 @@ Rectangle {
   height: Math.min(root.maxPopupHeight,
     root.visibleGridHeight + Style.space(84))
   radius: Style.cornerRadius
-  color: Color.menu.background
+  color: root.blurredBackground
+    ? Util.alpha(Color.menu.background, 0.82) : Color.menu.background
   border.width: 1
   border.color: Util.alpha(Color.menu.border, 0.62)
 

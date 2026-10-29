@@ -96,23 +96,19 @@ Item {
   // result; a large radius with too few passes can expose blocky artifacts.
   readonly property int micaBlurSize: 6
   readonly property int micaBlurPasses: 4
-  // Swipe behavior defaults to one page at a time. Kinetic is an optional
-  // enhancement exposed by the single "Kinetic Swipe" toggle.
-  property string flickBehavior: "single-page"
   property bool blurEnabled: false
   property bool blurBaseEnabled: true
   property int blurBaseSize: 8
   property int blurBasePasses: 1
   property bool blurBaseStateKnown: false
   property bool blurApplyPending: false
-  readonly property bool blurRequested: root.blurEnabled && root.opened
+  readonly property bool overviewBlurRequested: root.blurEnabled && root.opened
     && !root.settingsMode && !root.altTabOpen
+  readonly property bool altTabBlurRequested: root.blurEnabled
+    && root.altTabOverlayVisible
+  readonly property bool anyBlurRequested: root.overviewBlurRequested
+    || root.altTabBlurRequested
   readonly property var settingsOptions: [
-    {
-      kind: "flick",
-      label: "Kinetic Swipe",
-      description: "Enable momentum to move across multiple workspace pages. Off uses Single Page."
-    },
     {
       kind: "altTab",
       label: "Alt+Tab: All Workspaces",
@@ -120,11 +116,11 @@ Item {
     },
     {
       kind: "blur",
-      label: "Overview Background Blur",
-      description: "Use a softly blurred, theme-tinted Mica-like backdrop."
+      label: "Background Blur",
+      description: "Blur the desktop behind the overview and Alt+Tab panel."
     }
   ]
-  readonly property string flickSettingsPath:
+  readonly property string settingsPath:
     Quickshell.env("HOME") + "/.local/state/omarchy/settings/workspace-navigator.json"
   readonly property string safeConfigFileHelper:
     Quickshell.env("HOME")
@@ -138,12 +134,17 @@ Item {
     + 'hl.layer_rule({ name = "workspace-navigator-blur", '
     + 'match = { namespace = "^roubilibo-workspace-navigator$" }, blur = true }); '
     + 'workspaceNavigatorBlurRule:set_enabled('
-    + (root.blurRequested ? "true" : "false") + '); '
+    + (root.overviewBlurRequested ? "true" : "false") + '); '
+    + 'workspaceNavigatorAltTabBlurRule = workspaceNavigatorAltTabBlurRule or '
+    + 'hl.layer_rule({ name = "workspace-navigator-alt-tab-blur", '
+    + 'match = { namespace = "^roubilibo-workspace-navigator-alt-tab$" }, blur = true }); '
+    + 'workspaceNavigatorAltTabBlurRule:set_enabled('
+    + (root.altTabBlurRequested ? "true" : "false") + '); '
     + 'hl.config({ decoration = { blur = { enabled = '
-    + (root.blurRequested || root.blurBaseEnabled ? "true" : "false")
-    + ', size = ' + String(root.blurRequested
+    + (root.anyBlurRequested || root.blurBaseEnabled ? "true" : "false")
+    + ', size = ' + String(root.anyBlurRequested
       ? root.micaBlurSize : root.blurBaseSize)
-    + ', passes = ' + String(root.blurRequested
+    + ', passes = ' + String(root.anyBlurRequested
       ? root.micaBlurPasses : root.blurBasePasses)
     + ' } } })'
   readonly property string launcherMenuDirectory:
@@ -152,14 +153,11 @@ Item {
     root.launcherMenuDirectory + "/omarchy-menu.jsonc"
   readonly property string launcherMenuEntryText:
     '  "setup.workspace-navigator": {"icon":"󰒓","label":"Workspace Navigator",'
-    + '"description":"Configure swipe behavior, Alt+Tab scope, and blur",'
+    + '"description":"Configure Alt+Tab scope and background blur",'
     + '"action":"omarchy-shell roubilibo.workspace-navigator settings"}'
-  function loadFlickSettings(raw) {
+  function loadSettings(raw) {
     try {
       var settings = JSON.parse(String(raw || "{}"))
-      if (settings.flickBehavior === "single-page"
-          || settings.flickBehavior === "kinetic")
-        root.flickBehavior = settings.flickBehavior
       if (settings.altTabScope === "all" || settings.altTabScope === "workspace")
         root.altTabScope = settings.altTabScope
       root.blurEnabled = settings.blurEnabled === true
@@ -169,7 +167,6 @@ Item {
 
   function saveSettings() {
     root.settingsWriteText = JSON.stringify({
-      flickBehavior: root.flickBehavior,
       altTabScope: root.altTabScope,
       blurEnabled: root.blurEnabled
     }, null, 2) + "\n"
@@ -183,24 +180,16 @@ Item {
     settingsWriteProcess.running = true
   }
 
-  function setFlickBehavior(value) {
-    var mode = String(value) === "single-page" ? "single-page" : "kinetic"
-    root.flickBehavior = mode
-    root.settingsSelection = 0
-    root.saveSettings()
-    return "ok"
-  }
-
   function setAltTabScope(value) {
     root.altTabScope = String(value) === "all" ? "all" : "workspace"
-    root.settingsSelection = 1
+    root.settingsSelection = 0
     root.saveSettings()
     return "ok"
   }
 
   function setBlurEnabled(value) {
     root.blurEnabled = Boolean(value)
-    root.settingsSelection = 2
+    root.settingsSelection = 1
     root.saveSettings()
     root.applyBlurState()
     return "ok"
@@ -234,10 +223,7 @@ Item {
     var option = root.settingsOptions[index]
     if (!option) return
     root.settingsSelection = index
-    if (option.kind === "flick")
-      root.setFlickBehavior(root.flickBehavior === "kinetic"
-        ? "single-page" : "kinetic")
-    else if (option.kind === "altTab")
+    if (option.kind === "altTab")
       root.setAltTabScope(root.altTabScope === "all"
         ? "workspace" : "all")
     else if (option.kind === "blur")
@@ -256,7 +242,15 @@ Item {
 
   function ensureLauncherMenuEntry(raw) {
     var current = String(raw || "")
-    if (/^\s*"setup\.workspace-navigator"\s*:/m.test(current)) return
+    if (/^\s*"setup\.workspace-navigator"\s*:/m.test(current)) {
+      // Update only the description previously generated by this plugin,
+      // preserving other entries and user edits in the menu extension.
+      var updated = current.replace(
+        /("setup\.workspace-navigator"\s*:\s*\{[^}]*?"description"\s*:\s*)"Configure (?:swipe behavior, Alt\+Tab scope, and blur|swipe behavior and background blur|Alt\+Tab scope and overview blur)"/,
+        '$1"Configure Alt+Tab scope and background blur"')
+      if (updated !== current) root.writeLauncherMenu(updated)
+      return
+    }
 
     if (current.trim() === "") {
       root.writeLauncherMenu("{\n" + root.launcherMenuEntryText + "\n}\n")
@@ -1290,7 +1284,10 @@ Item {
     interval: 120
     repeat: false
     onTriggered: {
-      if (root.altTabOpen) root.altTabOverlayVisible = true
+      if (root.altTabOpen) {
+        root.altTabOverlayVisible = true
+        root.applyBlurState()
+      }
     }
   }
 
@@ -1423,10 +1420,10 @@ Item {
   Process {
     id: settingsReadProcess
     command: ["python3", root.safeConfigFileHelper, "read",
-      root.flickSettingsPath, "16384"]
+      root.settingsPath, "16384"]
     stdout: StdioCollector { id: settingsReadOutput; waitForEnd: true }
     onExited: function(exitCode) {
-      if (exitCode === 0) root.loadFlickSettings(settingsReadOutput.text)
+      if (exitCode === 0) root.loadSettings(settingsReadOutput.text)
       else if (exitCode !== 3)
         console.warn("workspace overview: could not read settings safely", exitCode)
     }
@@ -1435,7 +1432,7 @@ Item {
   Process {
     id: settingsWriteProcess
     command: ["python3", root.safeConfigFileHelper, "write",
-      root.flickSettingsPath, "16384", root.settingsWriteText]
+      root.settingsPath, "16384", root.settingsWriteText]
     onExited: function(exitCode) {
       if (exitCode !== 0)
         console.warn("workspace overview: could not save settings safely", exitCode)
@@ -1576,9 +1573,6 @@ Item {
     function close(): string { root.close(); return "ok" }
     function toggle(): string { root.toggle(); return "ok" }
     function settings(): string { root.openSettings(); return "ok" }
-    function setFlickBehavior(mode: string): string {
-      return root.setFlickBehavior(mode)
-    }
     function setAltTabScope(scope: string): string {
       return root.setAltTabScope(scope)
     }
@@ -1884,24 +1878,16 @@ Item {
                 var threshold = width * 0.50
                 var targetPage = swipeStartPage
                 if (Math.abs(delta) >= threshold) {
-                  if (root.flickBehavior === "single-page") {
-                    targetPage += delta > 0 ? 1 : -1
-                  } else {
-                    // Kinetic mode keeps every page reached by a fast flick.
-                    targetPage = Math.round(contentX / width)
-                    if (targetPage === swipeStartPage)
-                      targetPage += delta > 0 ? 1 : -1
-                  }
+                  targetPage += delta > 0 ? 1 : -1
                 } else {
                   targetPage = Math.round(contentX / width)
                 }
                 root.scrollToPage(targetPage)
               }
               onContentXChanged: {
-                if (root.flickBehavior === "single-page" && width > 0
-                    && (dragging || flicking)) {
-                  // Preserve native kinetic motion, but keep it inside the
-                  // adjacent-page interval for single-page mode.
+                if (width > 0 && (dragging || flicking)) {
+                  // Preserve native flick motion, but keep it within one
+                  // adjacent-page interval.
                   var startX = swipeStartPage * width
                   var lowerBound = Math.max(0, startX - width)
                   var upperBound = Math.min(contentWidth - width, startX + width)
@@ -2038,22 +2024,10 @@ Item {
             }
           }
 
-          AltTabOverlay {
-            id: altTabOverlay
-            opened: root.altTabOverlayVisible
-            scope: root.altTabScope
-            candidates: root.altTabCandidates
-            selectedIndex: root.altTabIndex
-            workspaceLabelFor: root.altTabWorkspaceLabel
-            onSelectionRequested: function(index) { root.altTabIndex = index }
-            onCommitRequested: root.altTabCommit()
-          }
-
           SettingsDialog {
             opened: root.settingsMode
             options: root.settingsOptions
             selectedIndex: root.settingsSelection
-            flickBehavior: root.flickBehavior
             altTabScope: root.altTabScope
             blurEnabled: root.blurEnabled
             onToggleRequested: function(index) { root.toggleSettingsOption(index) }
@@ -2371,6 +2345,53 @@ Item {
               }
             }
           }
+        }
+      }
+    }
+  }
+
+  // Keep the Alt+Tab blur surface bounded to the popup. The full-screen
+  // PanelWindow above owns exclusive keyboard focus while this one only
+  // receives pointer input.
+  Variants {
+    model: Quickshell.screens
+
+    delegate: Component {
+      PanelWindow {
+        required property var modelData
+        id: altTabPanelWindow
+        readonly property var panelScreen: modelData
+
+        screen: modelData
+        visible: root.altTabOverlayVisible && (Quickshell.screens.length === 1
+          || root.isFocusedScreen(modelData))
+        width: altTabOverlay.width
+        height: altTabOverlay.height
+        color: "transparent"
+        exclusionMode: ExclusionMode.Ignore
+
+        WlrLayershell.namespace: "roubilibo-workspace-navigator-alt-tab"
+        WlrLayershell.layer: WlrLayer.Overlay
+        WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+
+        anchors { top: true; left: true }
+        margins {
+          left: Math.max(0, Math.round((panelScreen.width - width) / 2))
+          top: Math.max(0, Math.round((panelScreen.height - height) / 2))
+        }
+
+        AltTabOverlay {
+          id: altTabOverlay
+          opened: root.altTabOverlayVisible
+          availableWidth: panelScreen.width
+          availableHeight: panelScreen.height
+          blurredBackground: root.altTabBlurRequested
+          scope: root.altTabScope
+          candidates: root.altTabCandidates
+          selectedIndex: root.altTabIndex
+          workspaceLabelFor: root.altTabWorkspaceLabel
+          onSelectionRequested: function(index) { root.altTabIndex = index }
+          onCommitRequested: root.altTabCommit()
         }
       }
     }

@@ -9,7 +9,6 @@ Rectangle {
   property bool opened: false
   property var options: []
   property int selectedIndex: 0
-  property string flickBehavior: "single-page"
   property string altTabScope: "workspace"
   property bool blurEnabled: false
   signal toggleRequested(int index)
@@ -61,10 +60,8 @@ Rectangle {
         label: modelData.label
         description: modelData.description
         hasCursor: root.selectedIndex === index
-        checked: modelData.kind === "flick"
-          ? root.flickBehavior === "kinetic"
-          : (modelData.kind === "altTab"
-            ? root.altTabScope === "all" : root.blurEnabled)
+        checked: modelData.kind === "altTab"
+          ? root.altTabScope === "all" : root.blurEnabled
         onClicked: root.toggleRequested(index)
       }
     }
