@@ -14,11 +14,17 @@ Rectangle {
   property bool isGroup: false
   property var groupMembers: []
   property var draggedToplevel: null
+  property Item homeParent: null
+  property Item dragOverlay: null
   property var selectedToplevel: null
   property bool liveCaptureEnabled: false
   property bool workspaceFocused: false
   property real dragGrabRatioX: 0.5
   property real dragGrabRatioY: 0.5
+  property real dragStartX: 0
+  property real dragStartY: 0
+  property real dragLastTranslationX: 0
+  property real dragLastTranslationY: 0
 
   readonly property var waylandToplevel: toplevel ? toplevel.wayland : null
   // Some clients (notably GTK/Nautilus) expose the Hyprland address through
@@ -35,6 +41,10 @@ Rectangle {
     && Number(root.draggedToplevel.workspace.id)
       === Number(root.toplevel.workspace.id)
   readonly property bool dragging: dragProxy.dragSessionActive
+  readonly property real dragTranslationX: root.dragging
+    ? root.dragLastTranslationX : 0
+  readonly property real dragTranslationY: root.dragging
+    ? root.dragLastTranslationY : 0
   readonly property bool selected: root.selectedToplevel !== null
     && root.isSameToplevel(root.selectedToplevel, root.toplevel)
   readonly property string appId: root.appIdFor(toplevel)
@@ -43,6 +53,8 @@ Rectangle {
   readonly property int maximumTitleLength: 512
 
   signal dragStarted(var toplevel)
+  signal dragMoved(var toplevel, real x, real y,
+    real grabRatioX, real grabRatioY)
   signal dragFinished(var toplevel)
   signal windowSelected(var toplevel)
   signal windowActivated(var toplevel)
@@ -315,6 +327,12 @@ Rectangle {
 
     onActiveChanged: {
       if (active) {
+        var start = root.dragOverlay
+          ? root.mapToItem(root.dragOverlay, 0, 0) : ({ x: root.x, y: root.y })
+        root.dragStartX = start.x
+        root.dragStartY = start.y
+        root.dragLastTranslationX = 0
+        root.dragLastTranslationY = 0
         root.dragGrabRatioX = Math.max(0, Math.min(1,
           previewDrag.centroid.pressPosition.x / Math.max(1, root.width)))
         root.dragGrabRatioY = Math.max(0, Math.min(1,
@@ -326,6 +344,18 @@ Rectangle {
         dragProxy.dragSessionActive = false
         root.dragFinished(root.toplevel)
       }
+    }
+
+    onTranslationChanged: {
+      if (!active) return
+      root.dragLastTranslationX = previewDrag.translation.x
+      root.dragLastTranslationY = previewDrag.translation.y
+      root.dragMoved(root.toplevel,
+        root.dragStartX + previewDrag.centroid.pressPosition.x
+          + previewDrag.translation.x,
+        root.dragStartY + previewDrag.centroid.pressPosition.y
+          + previewDrag.translation.y,
+        root.dragGrabRatioX, root.dragGrabRatioY)
     }
   }
 
@@ -347,4 +377,6 @@ Rectangle {
     Drag.supportedActions: Qt.MoveAction
     Drag.proposedAction: Qt.MoveAction
   }
+
+  parent: root.dragging && root.dragOverlay ? root.dragOverlay : root.homeParent
 }

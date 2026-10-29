@@ -19,6 +19,7 @@ BorderSurface {
   property bool deletable: false
   property bool keyboardSelected: false
   property var draggedToplevel: null
+  property Item dragOverlay: null
   property var selectedToplevel: null
   property bool livePreviews: false
   property int toplevelRevision: 0
@@ -74,6 +75,8 @@ BorderSurface {
   signal addWorkspaceRequested()
   signal workspaceDeleteRequested()
   signal windowDragStarted(var toplevel)
+  signal windowDragMoved(var toplevel, real x, real y,
+    real grabRatioX, real grabRatioY)
   signal windowDragFinished(var toplevel)
   signal windowSelected(var toplevel)
   signal windowActivated(var toplevel)
@@ -219,22 +222,33 @@ BorderSurface {
             : WindowGeometry.fallbackGeometry(index, root.windowCount,
               spatialPreview.width, spatialPreview.height, root.previewSpacing)
 
-          x: displayGeometry.x
-          y: displayGeometry.y
+          x: dragging ? dragStartX + dragTranslationX : displayGeometry.x
+          y: dragging ? dragStartY + dragTranslationY : displayGeometry.y
           width: Math.max(1, displayGeometry.width)
           height: Math.max(1, displayGeometry.height)
           // Hyprland paints floating clients above tiled clients. Keep the
           // navigator's stacking order consistent even when the IPC model
           // lists a floating client before a fullscreen-sized tiled client.
-          z: (previewFloating ? 1000 : 0) + index + 3
+          z: (dragging ? 2000 : (previewFloating ? 1000 : 0)) + index + 3
           toplevel: previewToplevel
+          homeParent: spatialPreview
+          dragOverlay: root.dragOverlay
           isGroup: Boolean(modelData && modelData.isGroup)
           groupMembers: modelData && modelData.members ? modelData.members : []
-          liveCaptureEnabled: root.livePreviews && root.hovered && root.visible
+          liveCaptureEnabled: root.livePreviews && root.visible
+            && (root.hovered
+              || root.isSameToplevel(root.draggedToplevel, previewToplevel))
           workspaceFocused: root.focused
           draggedToplevel: root.draggedToplevel
           selectedToplevel: root.selectedToplevel
           onDragStarted: root.windowDragStarted(previewToplevel)
+          onDragMoved: function(toplevel, x, y, grabRatioX, grabRatioY) {
+            var point = root.dragOverlay
+              ? spatialPreview.mapFromItem(root.dragOverlay, x, y)
+              : ({ x: x, y: y })
+            root.windowDragMoved(toplevel, point.x, point.y,
+              grabRatioX, grabRatioY)
+          }
           onDragFinished: root.windowDragFinished(previewToplevel)
           onWindowSelected: root.windowSelected(previewToplevel)
           onWindowActivated: root.windowActivated(previewToplevel)

@@ -40,6 +40,9 @@ Item {
   // down; doing so can make the pointer appear to jump to the new thumbnail
   // geometry.
   property bool refreshAfterDrag: false
+  property var dragStartState: null
+  property var pendingFloatingDragMove: null
+  property bool dragDropCommitted: false
   property string pendingReorderSourceAddress: ""
   property string pendingReorderTargetAddress: ""
   property int pendingWorkspaceCreateId: -1
@@ -998,11 +1001,32 @@ Item {
   function beginWindowDrag(toplevel) {
     root.refreshAfterDrag = false
     root.draggedToplevel = toplevel
+    root.dragDropCommitted = false
+    var ipc = toplevel && toplevel.lastIpcObject
+    root.dragStartState = ipc && ipc.at
+      ? ({ address: root.normalizedAddress(toplevel), floating: ipc.floating === true,
+           x: Number(ipc.at[0]), y: Number(ipc.at[1]), workspaceId: toplevel.workspace
+             ? root.positiveWorkspaceId(toplevel.workspace.id) : -1 }) : null
+    if (root.dragStartState && !root.dragStartState.floating)
+      root.setWindowFloating(root.dragStartState.address, true)
   }
 
   function endWindowDrag(toplevel) {
+    floatingDragMoveTimer.stop()
+    root.pendingFloatingDragMove = null
+    if (root.draggedToplevel === toplevel && root.dragStartState) {
+      if (!root.dragDropCommitted) {
+        root.dispatchWindowPosition(root.dragStartState.address,
+          { x: root.dragStartState.x, y: root.dragStartState.y })
+        if (!root.dragStartState.floating)
+          root.setWindowFloating(root.dragStartState.address, false)
+      }
+      root.refreshAfterDrag = true
+    }
     if (!root.draggedToplevel || root.draggedToplevel === toplevel)
       root.draggedToplevel = null
+    root.dragStartState = null
+    root.dragDropCommitted = false
     if (root.refreshAfterDrag) {
       root.refreshAfterDrag = false
       reorderRefreshTimer.restart()
@@ -1015,16 +1039,14 @@ Item {
     if (!address || id < 1) return
 
     try {
+      if (root.draggedToplevel === toplevel) root.dragDropCommitted = true
       if (Hyprland.usingLua) {
         Hyprland.dispatch("hl.dsp.window.move({ workspace = \"" + String(id)
           + "\", window = \"address:" + address + "\", follow = false })")
       } else {
         Hyprland.dispatch("movetoworkspacesilent " + String(id) + ",address:" + address)
       }
-      // Refresh immediately, then once more after Hyprland updates its object
-      // model. This keeps the source and destination cards visually in sync.
-      try { Hyprland.refreshWorkspaces(); Hyprland.refreshToplevels() } catch (e) {}
-      root.workspaceRevision += 1
+      root.refreshAfterWindowAction(toplevel)
     } catch (e) {
       console.warn("workspace overview: could not move window", address, id, e)
     }
@@ -1035,8 +1057,26 @@ Item {
     return Boolean(ipc && ipc.floating === true)
   }
 
-  function moveFloatingWindow(toplevel, workspaceId, areaX, areaY,
-                               areaWidth, areaHeight, grabRatioX, grabRatioY) {
+  function setWindowFloating(address, floating) {
+    if (!address || !Hyprland.usingLua) return false
+    try {
+      Hyprland.dispatch('hl.dsp.window.float({ action = "'
+        + (floating ? "on" : "off") + '", window = "address:' + address + '" })')
+      return true
+    } catch (e) {
+      console.warn("workspace overview: could not change window floating state",
+        address, floating, e)
+      return false
+    }
+  }
+
+  function wasFloatingAtDragStart(toplevel) {
+    return root.draggedToplevel === toplevel && root.dragStartState
+      ? root.dragStartState.floating : root.isFloatingWindow(toplevel)
+  }
+
+  function floatingWindowPosition(toplevel, workspaceId, areaX, areaY,
+                                   areaWidth, areaHeight, grabRatioX, grabRatioY) {
     var address = root.normalizedAddress(toplevel)
     var id = root.positiveWorkspaceId(workspaceId)
     var ipc = toplevel && toplevel.lastIpcObject
@@ -1052,14 +1092,100 @@ Item {
       }
     }
     var size = ipc && ipc.size ? ipc.size : null
-    if (!address || id < 1 || !monitor || !size || size.length < 2) return
+    if (!address || id < 1 || !monitor || !size || size.length < 2) return null
 
     var position = WindowGeometry.workspacePosition(monitor, screen,
       areaWidth, areaHeight, areaX, areaY, grabRatioX, grabRatioY,
       size[0], size[1])
-    if (!position) return
+    return position ? ({ address: address, workspaceId: id, position: position }) : null
+  }
+
+  function finishTiledWindowDrop(toplevel, workspaceId, x, y,
+                                  grabRatioX, grabRatioY, areaWidth, areaHeight) {
+    var state = root.draggedToplevel === toplevel ? root.dragStartState : null
+    var address = root.normalizedAddress(toplevel)
+    var id = root.positiveWorkspaceId(workspaceId)
+    if (!Hyprland.usingLua || !state || state.floating || !address || id < 1)
+      return false
+    var move = root.floatingWindowPosition(toplevel, id, x, y,
+      areaWidth, areaHeight, grabRatioX, grabRatioY)
+    if (!move) return false
+    try {
+      if (state.workspaceId !== id) {
+        Hyprland.dispatch('hl.dsp.window.move({ workspace = "' + String(id)
+          + '", window = "address:' + address + '", follow = false })')
+      }
+      root.dispatchWindowPosition(address, move.position)
+      if (!root.setWindowFloating(address, false)) return false
+      root.dragDropCommitted = true
+      root.refreshAfterWindowAction(toplevel)
+      return true
+    } catch (e) {
+      console.warn("workspace overview: could not finish tiled window drag",
+        address, id, e)
+      return false
+    }
+  }
+
+  function dispatchWindowPosition(address, position) {
+    if (!address || !position) return
+    if (Hyprland.usingLua) {
+      Hyprland.dispatch("hl.dsp.window.move({ x = " + String(position.x)
+        + ", y = " + String(position.y)
+        + ", relative = false, window = \"address:" + address + "\" })")
+    } else {
+      Hyprland.dispatch("movewindowpixel exact " + String(position.x) + " "
+        + String(position.y) + ",address:" + address)
+    }
+  }
+
+  function queueFloatingWindowDragMove(toplevel, workspaceId, areaX, areaY,
+                                       areaWidth, areaHeight, grabRatioX, grabRatioY) {
+    var temporarilyFloated = root.draggedToplevel === toplevel
+      && root.dragStartState && !root.dragStartState.floating
+    if (root.draggedToplevel !== toplevel
+        || (!temporarilyFloated && !root.isFloatingWindow(toplevel))) return
+    root.pendingFloatingDragMove = {
+      toplevel: toplevel, workspaceId: workspaceId, x: areaX, y: areaY,
+      width: areaWidth, height: areaHeight,
+      grabRatioX: grabRatioX, grabRatioY: grabRatioY
+    }
+    if (!floatingDragMoveTimer.running) floatingDragMoveTimer.start()
+  }
+
+  function applyQueuedFloatingWindowDragMove() {
+    var pending = root.pendingFloatingDragMove
+    root.pendingFloatingDragMove = null
+    if (!pending || root.draggedToplevel !== pending.toplevel) return
+    var move = root.floatingWindowPosition(pending.toplevel, pending.workspaceId,
+      pending.x, pending.y, pending.width, pending.height,
+      pending.grabRatioX, pending.grabRatioY)
+    if (move) root.dispatchWindowPosition(move.address, move.position)
+  }
+
+  function refreshAfterWindowAction(toplevel) {
+    try { Hyprland.refreshWorkspaces(); Hyprland.refreshToplevels() } catch (e) {}
+    if (root.draggedToplevel === toplevel) {
+      root.refreshAfterDrag = true
+      return
+    }
+    root.workspaceRevision += 1
+  }
+
+  function moveFloatingWindow(toplevel, workspaceId, areaX, areaY,
+                               areaWidth, areaHeight, grabRatioX, grabRatioY) {
+    var move = root.floatingWindowPosition(toplevel, workspaceId,
+      areaX, areaY, areaWidth, areaHeight, grabRatioX, grabRatioY)
+    if (!move) return
+    var address = move.address
+    var id = move.workspaceId
 
     try {
+      if (root.draggedToplevel === toplevel) {
+        root.dragDropCommitted = true
+        floatingDragMoveTimer.stop()
+        root.pendingFloatingDragMove = null
+      }
       var currentWorkspaceId = toplevel.workspace
         ? root.positiveWorkspaceId(toplevel.workspace.id) : -1
       if (currentWorkspaceId !== id) {
@@ -1071,16 +1197,8 @@ Item {
             + ",address:" + address)
         }
       }
-      if (Hyprland.usingLua) {
-        Hyprland.dispatch("hl.dsp.window.move({ x = " + String(position.x)
-          + ", y = " + String(position.y)
-          + ", relative = false, window = \"address:" + address + "\" })")
-      } else {
-        Hyprland.dispatch("movewindowpixel exact " + String(position.x) + " "
-          + String(position.y) + ",address:" + address)
-      }
-      try { Hyprland.refreshWorkspaces(); Hyprland.refreshToplevels() } catch (e) {}
-      root.workspaceRevision += 1
+      root.dispatchWindowPosition(address, move.position)
+      root.refreshAfterWindowAction(toplevel)
     } catch (e) {
       console.warn("workspace overview: could not position floating window",
         address, id, e)
@@ -1224,6 +1342,11 @@ Item {
 
   function handleWindowDrop(sourceToplevel, targetToplevel, destinationWorkspaceId,
                             x, y, grabRatioX, grabRatioY, areaWidth, areaHeight) {
+    if (!root.wasFloatingAtDragStart(sourceToplevel)) {
+      root.finishTiledWindowDrop(sourceToplevel, destinationWorkspaceId,
+        x, y, grabRatioX, grabRatioY, areaWidth, areaHeight)
+      return
+    }
     var sourceWorkspaceId = sourceToplevel && sourceToplevel.workspace
       ? root.positiveWorkspaceId(sourceToplevel.workspace.id) : -1
     var targetWorkspaceId = targetToplevel && targetToplevel.workspace
@@ -1384,6 +1507,13 @@ Item {
     onTriggered: {
       if (root.altTabCommitPending && root.altTabOpen) root.altTabCommit()
     }
+  }
+
+  Timer {
+    id: floatingDragMoveTimer
+    interval: 16
+    repeat: false
+    onTriggered: root.applyQueuedFloatingWindowDragMove()
   }
 
   Timer {
@@ -2074,6 +2204,7 @@ Item {
                           keyboardSelected: root.selectedIndex === absoluteIndex
                           draggedToplevel: root.draggedToplevel
                           selectedToplevel: root.selectedToplevel
+                          dragOverlay: dragPreviewOverlay
                           livePreviews: root.opened && panelWindow.visible
                           toplevelRevision: root.workspaceRevision
                           onWorkspaceHovered: root.selectedIndex = absoluteIndex
@@ -2090,11 +2221,20 @@ Item {
                             root.selectWindow(toplevel)
                             root.beginWindowDrag(toplevel)
                           }
+                          onWindowDragMoved: function(toplevel, x, y,
+                                                      grabRatioX, grabRatioY) {
+                            root.queueFloatingWindowDragMove(toplevel,
+                              cardWorkspaceId, x, y, width, height,
+                              grabRatioX, grabRatioY)
+                          }
                           onWindowDragFinished: function(toplevel) { root.endWindowDrag(toplevel) }
                           onWindowSelected: function(toplevel) { root.selectWindow(toplevel) }
                           onWindowActivated: function(toplevel) { root.focusToplevel(toplevel) }
                           onWindowDropped: function(toplevel, x, y, grabRatioX, grabRatioY) {
-                            if (root.isFloatingWindow(toplevel)) {
+                            if (!root.wasFloatingAtDragStart(toplevel)) {
+                              root.finishTiledWindowDrop(toplevel, cardWorkspaceId,
+                                x, y, grabRatioX, grabRatioY, width, height)
+                            } else if (root.isFloatingWindow(toplevel)) {
                               root.moveFloatingWindow(toplevel, cardWorkspaceId,
                                 x, y, width, height, grabRatioX, grabRatioY)
                             } else {
@@ -2451,6 +2591,12 @@ Item {
               }
             }
           }
+        }
+
+        Item {
+          id: dragPreviewOverlay
+          anchors.fill: parent
+          z: 1000000
         }
       }
     }
