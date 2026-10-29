@@ -66,33 +66,18 @@ Alt to focus the highlighted window. Esc cancels the switcher.
 omarchy plugin add https://github.com/roubilibo/omarchy-workspace-navigator.git --enable --yes
 ```
 
-### Install keyboard shortcuts
-
-Add this small loader block to the end of
-`~/.config/hypr/bindings.lua`:
-
-```lua
--- BEGIN roubilibo.workspace-navigator managed keybindings
-do
-  local navigator = os.getenv("HOME") .. "/.config/omarchy/plugins/roubilibo.workspace-navigator/hypr/workspace-navigator.lua"
-  local file = io.open(navigator, "r")
-  if file then
-    file:close()
-    pcall(dofile, navigator)
-  end
-end
--- END roubilibo.workspace-navigator managed keybindings
-```
+When enabled, the plugin adds its managed loader block to
+`~/.config/hypr/bindings.lua` and reloads Hyprland if the file changes. It
+backs up an existing bindings file before editing it. The loader checks
+`shell.json`, so the shortcuts are inactive while the plugin is disabled or
+removed.
 
 The source is organized by responsibility: `src/Panel.qml` coordinates plugin
 state, reusable QML UI lives in `src/components/`, and shared JavaScript logic
-lives in `src/lib/`. The Hyprland binding source is in `hypr/`, and the bounded,
-no-follow config-file helper is in `bin/`. Your Hyprland config contains only
-this loader. Reload Hyprland after adding the block or updating the plugin:
-
-```bash
-hyprctl reload
-```
+lives in `src/lib/`. The Hyprland binding source is in `hypr/`; only its small
+loader block is added to `bindings.lua`. The bounded, no-follow config-file
+helper is in `bin/`. The plugin reloads Hyprland automatically when it adds or
+repairs the block.
 
 The plugin can also be opened directly without a keybinding:
 

@@ -125,6 +125,8 @@ Item {
   readonly property string safeConfigFileHelper:
     Quickshell.env("HOME")
     + "/.config/omarchy/plugins/roubilibo.workspace-navigator/bin/safe-config-file.py"
+  readonly property string hyprBindingsPath:
+    Quickshell.env("HOME") + "/.config/hypr/bindings.lua"
   property string settingsWriteText: ""
   property bool settingsWriteDirty: false
   property string launcherMenuWriteText: ""
@@ -306,6 +308,7 @@ Item {
   Component.onCompleted: {
     settingsReadProcess.running = true
     launcherMenuReadProcess.running = true
+    bindingSyncProcess.running = true
     root.rememberAltTabFocus(Hyprland.activeToplevel)
     root.applyBlurState()
   }
@@ -1462,6 +1465,30 @@ Item {
       if (exitCode !== 0)
         console.warn("workspace overview: could not update omarchy menu extension safely", exitCode)
       if (root.launcherMenuWriteDirty) root.startLauncherMenuWrite()
+    }
+  }
+
+  Process {
+    id: bindingSyncProcess
+    command: ["python3", root.safeConfigFileHelper, "sync-loader",
+      root.hyprBindingsPath, "65536"]
+    stdout: StdioCollector { id: bindingSyncOutput; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        console.warn("workspace overview: could not add Hyprland bindings safely", exitCode)
+        return
+      }
+      if (String(bindingSyncOutput.text || "").trim() === "changed")
+        bindingReloadProcess.running = true
+    }
+  }
+
+  Process {
+    id: bindingReloadProcess
+    command: ["hyprctl", "reload"]
+    onExited: function(exitCode) {
+      if (exitCode !== 0)
+        console.warn("workspace overview: Hyprland config reload failed", exitCode)
     }
   }
 
