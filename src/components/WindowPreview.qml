@@ -29,7 +29,7 @@ Rectangle {
   readonly property var waylandToplevel: toplevel ? toplevel.wayland : null
   // Some clients (notably GTK/Nautilus) expose the Hyprland address through
   // lastIpcObject instead of the direct toplevel property. Use the same
-  // resolver as move/swap so those thumbnails are draggable too.
+  // address resolver as window moves so those thumbnails remain draggable.
   readonly property bool movable: toplevel !== null
     && WindowModel.toplevelAddress(toplevel) !== ""
   // Cross-workspace drops belong to the workspace card. Keeping this drop
@@ -196,8 +196,7 @@ Rectangle {
     radius: root.radius
   }
 
-  // A drop on another thumbnail is an in-workspace layout operation. The
-  // parent overview decides whether it means a swap or a workspace move.
+  // The parent overview applies the workspace and floating-window drop rules.
   DropArea {
     id: windowDropArea
     anchors.fill: parent

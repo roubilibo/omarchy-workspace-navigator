@@ -35,16 +35,14 @@ Item {
   // rebuilt while the panel is open.
   property int workspaceRevision: 0
   property var draggedToplevel: null
-  // A compositor reorder changes the toplevel model. Do not rebuild the
-  // thumbnail Repeater while Qt's native drag session is still being torn
-  // down; doing so can make the pointer appear to jump to the new thumbnail
-  // geometry.
+  // Workspace moves change the toplevel model. Defer rebuilding the
+  // thumbnail Repeater until Qt's native drag session is done so the pointer
+  // does not jump to new thumbnail geometry during teardown.
   property bool refreshAfterDrag: false
   property var dragStartState: null
   property var pendingFloatingDragMove: null
-  property bool dragDropCommitted: false
-  property string pendingReorderSourceAddress: ""
-  property string pendingReorderTargetAddress: ""
+  property var pendingWindowDrop: null
+  property var pendingTiledSwap: null
   property int pendingWorkspaceCreateId: -1
   property int pendingWorkspacePersistId: -1
   property int pendingWorkspaceUnpersistId: -1
@@ -1001,35 +999,36 @@ Item {
   function beginWindowDrag(toplevel) {
     root.refreshAfterDrag = false
     root.draggedToplevel = toplevel
-    root.dragDropCommitted = false
     var ipc = toplevel && toplevel.lastIpcObject
-    root.dragStartState = ipc && ipc.at
-      ? ({ address: root.normalizedAddress(toplevel), floating: ipc.floating === true,
-           x: Number(ipc.at[0]), y: Number(ipc.at[1]), workspaceId: toplevel.workspace
-             ? root.positiveWorkspaceId(toplevel.workspace.id) : -1 }) : null
-    if (root.dragStartState && !root.dragStartState.floating)
-      root.setWindowFloating(root.dragStartState.address, true)
+    var address = root.normalizedAddress(toplevel)
+    var workspaceId = toplevel && toplevel.workspace
+      ? root.positiveWorkspaceId(toplevel.workspace.id) : -1
+    var x = ipc && ipc.at ? Number(ipc.at[0]) : NaN
+    var y = ipc && ipc.at ? Number(ipc.at[1]) : NaN
+    root.dragStartState = address && workspaceId > 0
+      ? ({ address: address, floating: Boolean(ipc && ipc.floating === true),
+           x: x, y: y, hasPosition: isFinite(x) && isFinite(y),
+           workspaceId: workspaceId }) : null
   }
 
   function endWindowDrag(toplevel) {
     floatingDragMoveTimer.stop()
     root.pendingFloatingDragMove = null
     if (root.draggedToplevel === toplevel && root.dragStartState) {
-      if (!root.dragDropCommitted) {
+      var dropPending = root.pendingWindowDrop
+        && root.pendingWindowDrop.address === root.dragStartState.address
+      if (!dropPending && root.dragStartState.floating
+          && root.dragStartState.hasPosition)
         root.dispatchWindowPosition(root.dragStartState.address,
           { x: root.dragStartState.x, y: root.dragStartState.y })
-        if (!root.dragStartState.floating)
-          root.setWindowFloating(root.dragStartState.address, false)
-      }
       root.refreshAfterDrag = true
     }
     if (!root.draggedToplevel || root.draggedToplevel === toplevel)
       root.draggedToplevel = null
     root.dragStartState = null
-    root.dragDropCommitted = false
     if (root.refreshAfterDrag) {
       root.refreshAfterDrag = false
-      reorderRefreshTimer.restart()
+      dragRefreshTimer.restart()
     }
   }
 
@@ -1039,13 +1038,7 @@ Item {
     if (!address || id < 1) return
 
     try {
-      if (root.draggedToplevel === toplevel) root.dragDropCommitted = true
-      if (Hyprland.usingLua) {
-        Hyprland.dispatch("hl.dsp.window.move({ workspace = \"" + String(id)
-          + "\", window = \"address:" + address + "\", follow = false })")
-      } else {
-        Hyprland.dispatch("movetoworkspacesilent " + String(id) + ",address:" + address)
-      }
+      root.dispatchWorkspaceMove(address, id)
       root.refreshAfterWindowAction(toplevel)
     } catch (e) {
       console.warn("workspace overview: could not move window", address, id, e)
@@ -1075,6 +1068,95 @@ Item {
       ? root.dragStartState.floating : root.isFloatingWindow(toplevel)
   }
 
+  function dispatchWorkspaceMove(address, workspaceId) {
+    if (Hyprland.usingLua) {
+      Hyprland.dispatch("hl.dsp.window.move({ workspace = \""
+        + String(workspaceId) + "\", window = \"address:" + address
+        + "\", follow = false })")
+    } else {
+      Hyprland.dispatch("movetoworkspacesilent " + String(workspaceId)
+        + ",address:" + address)
+    }
+  }
+
+  function swapTiledWindows(sourceToplevel, targetToplevel) {
+    var sourceAddress = root.normalizedAddress(sourceToplevel)
+    var targetAddress = root.normalizedAddress(targetToplevel)
+    var sourceWorkspaceId = sourceToplevel && sourceToplevel.workspace
+      ? root.positiveWorkspaceId(sourceToplevel.workspace.id) : -1
+    var targetWorkspaceId = targetToplevel && targetToplevel.workspace
+      ? root.positiveWorkspaceId(targetToplevel.workspace.id) : -1
+    if (!Hyprland.usingLua || !sourceAddress || !targetAddress
+        || sourceAddress === targetAddress || sourceWorkspaceId < 1
+        || sourceWorkspaceId !== targetWorkspaceId
+        || root.wasFloatingAtDragStart(sourceToplevel)
+        || root.isFloatingWindow(targetToplevel)
+        || cursorProbe.running || root.pendingTiledSwap)
+      return false
+
+    root.pendingTiledSwap = {
+      sourceAddress: sourceAddress,
+      targetAddress: targetAddress,
+      workspaceId: sourceWorkspaceId
+    }
+    cursorProbe.running = true
+    return true
+  }
+
+  function finishTiledWindowSwap(exitCode, cursorPosition) {
+    var swap = root.pendingTiledSwap
+    root.pendingTiledSwap = null
+    if (exitCode !== 0 || !swap) return
+
+    var match = String(cursorPosition || "").match(
+      /^\s*(-?\d+)\s*,\s*(-?\d+)\s*$/)
+    if (!match) {
+      console.warn("workspace overview: could not parse cursor position",
+        cursorPosition)
+      return
+    }
+    var x = Number(match[1])
+    var y = Number(match[2])
+    if (!isFinite(x) || !isFinite(y) || Math.floor(x) !== x
+        || Math.floor(y) !== y || Math.abs(x) > root.maximumWorkspaceId
+        || Math.abs(y) > root.maximumWorkspaceId) {
+      console.warn("workspace overview: refusing invalid cursor position",
+        cursorPosition)
+      return
+    }
+
+    var source = root.findToplevelByAddress(swap.sourceAddress)
+    var target = root.findToplevelByAddress(swap.targetAddress)
+    if (!source || !target || root.isFloatingWindow(source)
+        || root.isFloatingWindow(target)
+        || !source.workspace || !target.workspace
+        || root.positiveWorkspaceId(source.workspace.id) !== swap.workspaceId
+        || root.positiveWorkspaceId(target.workspace.id) !== swap.workspaceId) {
+      console.warn("workspace overview: tiled swap targets changed before drop")
+      return
+    }
+
+    try {
+      Hyprland.dispatch("hl.dsp.window.swap({ window = \"address:"
+        + swap.sourceAddress + "\", target = \"address:"
+        + swap.targetAddress + "\" })")
+    } catch (e) {
+      console.warn("workspace overview: could not swap tiled windows",
+        swap.sourceAddress, swap.targetAddress, e)
+      return
+    }
+
+    try {
+      Hyprland.dispatch("hl.dsp.cursor.move({ x = " + String(x)
+        + ", y = " + String(y) + " })")
+    } catch (e) {
+      console.warn("workspace overview: could not restore cursor after tiled swap", e)
+    }
+    try { Hyprland.refreshToplevels() } catch (e) {}
+    if (root.draggedToplevel !== null) root.refreshAfterDrag = true
+    else root.workspaceRevision += 1
+  }
+
   function floatingWindowPosition(toplevel, workspaceId, areaX, areaY,
                                    areaWidth, areaHeight, grabRatioX, grabRatioY) {
     var address = root.normalizedAddress(toplevel)
@@ -1100,33 +1182,6 @@ Item {
     return position ? ({ address: address, workspaceId: id, position: position }) : null
   }
 
-  function finishTiledWindowDrop(toplevel, workspaceId, x, y,
-                                  grabRatioX, grabRatioY, areaWidth, areaHeight) {
-    var state = root.draggedToplevel === toplevel ? root.dragStartState : null
-    var address = root.normalizedAddress(toplevel)
-    var id = root.positiveWorkspaceId(workspaceId)
-    if (!Hyprland.usingLua || !state || state.floating || !address || id < 1)
-      return false
-    var move = root.floatingWindowPosition(toplevel, id, x, y,
-      areaWidth, areaHeight, grabRatioX, grabRatioY)
-    if (!move) return false
-    try {
-      if (state.workspaceId !== id) {
-        Hyprland.dispatch('hl.dsp.window.move({ workspace = "' + String(id)
-          + '", window = "address:' + address + '", follow = false })')
-      }
-      root.dispatchWindowPosition(address, move.position)
-      if (!root.setWindowFloating(address, false)) return false
-      root.dragDropCommitted = true
-      root.refreshAfterWindowAction(toplevel)
-      return true
-    } catch (e) {
-      console.warn("workspace overview: could not finish tiled window drag",
-        address, id, e)
-      return false
-    }
-  }
-
   function dispatchWindowPosition(address, position) {
     if (!address || !position) return
     if (Hyprland.usingLua) {
@@ -1141,10 +1196,9 @@ Item {
 
   function queueFloatingWindowDragMove(toplevel, workspaceId, areaX, areaY,
                                        areaWidth, areaHeight, grabRatioX, grabRatioY) {
-    var temporarilyFloated = root.draggedToplevel === toplevel
-      && root.dragStartState && !root.dragStartState.floating
-    if (root.draggedToplevel !== toplevel
-        || (!temporarilyFloated && !root.isFloatingWindow(toplevel))) return
+    if (root.draggedToplevel !== toplevel || !root.wasFloatingAtDragStart(toplevel)
+        || !root.dragStartState || !root.dragStartState.hasPosition)
+      return
     root.pendingFloatingDragMove = {
       toplevel: toplevel, workspaceId: workspaceId, x: areaX, y: areaY,
       width: areaWidth, height: areaHeight,
@@ -1172,36 +1226,133 @@ Item {
     root.workspaceRevision += 1
   }
 
-  function moveFloatingWindow(toplevel, workspaceId, areaX, areaY,
-                               areaWidth, areaHeight, grabRatioX, grabRatioY) {
-    var move = root.floatingWindowPosition(toplevel, workspaceId,
-      areaX, areaY, areaWidth, areaHeight, grabRatioX, grabRatioY)
-    if (!move) return
-    var address = move.address
-    var id = move.workspaceId
+  function findToplevelByAddress(address) {
+    var values = []
+    try { values = Hyprland.toplevels.values } catch (e) {}
+    for (var i = 0; i < values.length; i++) {
+      if (root.normalizedAddress(values[i]) === address) return values[i]
+    }
+    return null
+  }
 
+  function dragStateMatches(toplevel, state, expectedWorkspaceId, expectedPosition) {
+    if (!toplevel || !state) return false
+    var workspaceId = toplevel.workspace
+      ? root.positiveWorkspaceId(toplevel.workspace.id) : -1
+    var ipc = toplevel.lastIpcObject
+    if (workspaceId !== expectedWorkspaceId
+        || Boolean(ipc && ipc.floating === true) !== state.floating)
+      return false
+    if (!state.floating || !expectedPosition) return true
+    var at = ipc && ipc.at
+    return Boolean(at && at.length >= 2
+      && Math.abs(Number(at[0]) - expectedPosition.x) <= 2
+      && Math.abs(Number(at[1]) - expectedPosition.y) <= 2)
+  }
+
+  function restoreWindowDropState(state) {
+    if (!state || !state.address) return false
     try {
-      if (root.draggedToplevel === toplevel) {
-        root.dragDropCommitted = true
-        floatingDragMoveTimer.stop()
-        root.pendingFloatingDragMove = null
-      }
-      var currentWorkspaceId = toplevel.workspace
-        ? root.positiveWorkspaceId(toplevel.workspace.id) : -1
-      if (currentWorkspaceId !== id) {
-        if (Hyprland.usingLua) {
-          Hyprland.dispatch("hl.dsp.window.move({ workspace = \"" + String(id)
-            + "\", window = \"address:" + address + "\", follow = false })")
-        } else {
-          Hyprland.dispatch("movetoworkspacesilent " + String(id)
-            + ",address:" + address)
-        }
-      }
-      root.dispatchWindowPosition(address, move.position)
-      root.refreshAfterWindowAction(toplevel)
+      if (state.workspaceId > 0)
+        root.dispatchWorkspaceMove(state.address, state.workspaceId)
+      root.setWindowFloating(state.address, state.floating)
+      if (state.floating && state.hasPosition)
+        root.dispatchWindowPosition(state.address, { x: state.x, y: state.y })
+      return true
     } catch (e) {
-      console.warn("workspace overview: could not position floating window",
-        address, id, e)
+      console.warn("workspace overview: could not restore window after drop",
+        state.address, state.workspaceId, e)
+      return false
+    }
+  }
+
+  function verifyPendingWindowDrop() {
+    var transaction = root.pendingWindowDrop
+    if (!transaction) return
+    try { Hyprland.refreshWorkspaces(); Hyprland.refreshToplevels() } catch (e) {}
+    var current = root.findToplevelByAddress(transaction.address)
+    var expectedWorkspaceId = transaction.rollingBack
+      ? transaction.original.workspaceId : transaction.workspaceId
+    var expectedPosition = transaction.rollingBack
+      ? (transaction.original.floating && transaction.original.hasPosition
+        ? ({ x: transaction.original.x, y: transaction.original.y }) : null)
+      : transaction.position
+    if (root.dragStateMatches(current, transaction.original,
+        expectedWorkspaceId, expectedPosition)) {
+      root.pendingWindowDrop = null
+      root.workspaceRevision += 1
+      return
+    }
+
+    transaction.attempts += 1
+    if (transaction.rollingBack) {
+      if (transaction.attempts < 3) {
+        root.restoreWindowDropState(transaction.original)
+        windowDropVerifyTimer.restart()
+        return
+      }
+      console.warn("workspace overview: drop verification failed after rollback",
+        transaction.address, expectedWorkspaceId)
+      root.pendingWindowDrop = null
+      root.workspaceRevision += 1
+      return
+    }
+    if (transaction.attempts < 3) {
+      windowDropVerifyTimer.restart()
+      return
+    }
+
+    transaction.rollingBack = true
+    transaction.attempts = 0
+    root.restoreWindowDropState(transaction.original)
+    windowDropVerifyTimer.restart()
+  }
+
+  function dropWindowOnWorkspace(toplevel, workspaceId, x, y,
+                                 grabRatioX, grabRatioY, areaWidth, areaHeight,
+                                 targetToplevel) {
+    var state = root.draggedToplevel === toplevel ? root.dragStartState : null
+    var id = root.positiveWorkspaceId(workspaceId)
+    if (!state || state.workspaceId < 1 || id < 1 || root.pendingWindowDrop)
+      return false
+    if (state.floating && !state.hasPosition) return false
+
+    // Same-workspace tiled drops target a concrete tile, so swap layout slots
+    // while leaving both windows tiled. Drops on floating targets are ignored.
+    if (!state.floating && state.workspaceId === id) {
+      if (targetToplevel && !root.isFloatingWindow(targetToplevel))
+        root.swapTiledWindows(toplevel, targetToplevel)
+      return true
+    }
+
+    var position = null
+    if (state.floating) {
+      var move = root.floatingWindowPosition(toplevel, id, x, y,
+        areaWidth, areaHeight, grabRatioX, grabRatioY)
+      if (!move) return false
+      position = move.position
+    }
+
+    var transaction = {
+      address: state.address, original: state,
+      workspaceId: id, position: position,
+      attempts: 0, rollingBack: false
+    }
+    root.pendingWindowDrop = transaction
+    try {
+      if (state.workspaceId !== id)
+        root.dispatchWorkspaceMove(state.address, id)
+      if (position) root.dispatchWindowPosition(state.address, position)
+      root.refreshAfterWindowAction(toplevel)
+      windowDropVerifyTimer.start()
+      return true
+    } catch (e) {
+      console.warn("workspace overview: could not dispatch window drop",
+        state.address, id, e)
+      transaction.rollingBack = true
+      root.restoreWindowDropState(state)
+      windowDropVerifyTimer.start()
+      return false
     }
   }
 
@@ -1299,76 +1450,6 @@ Item {
       root.performWorkspaceDelete(workspaceId)
       workspaceId = -1
       attempts = 0
-    }
-  }
-
-  function reorderWindowTowards(sourceToplevel, targetToplevel) {
-    var sourceAddress = root.normalizedAddress(sourceToplevel)
-    var targetAddress = root.normalizedAddress(targetToplevel)
-    if (!sourceAddress || !targetAddress) return
-    if (sourceAddress === targetAddress) return
-
-    var sourceWorkspaceId = sourceToplevel && sourceToplevel.workspace
-      ? root.positiveWorkspaceId(sourceToplevel.workspace.id) : -1
-    var targetWorkspaceId = targetToplevel && targetToplevel.workspace
-      ? root.positiveWorkspaceId(targetToplevel.workspace.id) : -1
-    if (sourceWorkspaceId < 1
-        || sourceWorkspaceId !== targetWorkspaceId) {
-      console.warn("workspace overview: refusing cross-workspace window reorder",
-        sourceAddress, targetAddress, sourceWorkspaceId, targetWorkspaceId)
-      return
-    }
-
-    try {
-      if (!Hyprland.usingLua) {
-        console.warn("workspace overview: window reorder requires Hyprland Lua")
-        return
-      }
-
-      // Select both windows explicitly. This works for inactive workspaces
-      // and swaps the exact thumbnails involved in the drop.
-      // Hyprland's window.swap intentionally warps the cursor to the source
-      // window after switching layout targets. Capture the real pointer
-      // location first so it can be restored exactly once after the swap.
-      if (cursorProbe.running) return
-      root.pendingReorderSourceAddress = sourceAddress
-      root.pendingReorderTargetAddress = targetAddress
-      cursorProbe.running = true
-    } catch (e) {
-      console.warn("workspace overview: could not reorder windows",
-        sourceAddress, targetAddress, e)
-    }
-  }
-
-  function handleWindowDrop(sourceToplevel, targetToplevel, destinationWorkspaceId,
-                            x, y, grabRatioX, grabRatioY, areaWidth, areaHeight) {
-    if (!root.wasFloatingAtDragStart(sourceToplevel)) {
-      root.finishTiledWindowDrop(sourceToplevel, destinationWorkspaceId,
-        x, y, grabRatioX, grabRatioY, areaWidth, areaHeight)
-      return
-    }
-    var sourceWorkspaceId = sourceToplevel && sourceToplevel.workspace
-      ? root.positiveWorkspaceId(sourceToplevel.workspace.id) : -1
-    var targetWorkspaceId = targetToplevel && targetToplevel.workspace
-      ? root.positiveWorkspaceId(targetToplevel.workspace.id)
-      : root.positiveWorkspaceId(destinationWorkspaceId)
-
-    var sourceFloating = root.isFloatingWindow(sourceToplevel)
-    var targetFloating = root.isFloatingWindow(targetToplevel)
-    if (sourceWorkspaceId === targetWorkspaceId) {
-      if (sourceFloating) {
-        root.moveFloatingWindow(sourceToplevel, destinationWorkspaceId,
-          x, y, areaWidth, areaHeight, grabRatioX, grabRatioY)
-      } else if (targetToplevel && !targetFloating) {
-        root.reorderWindowTowards(sourceToplevel, targetToplevel)
-      }
-      return
-    }
-    if (sourceFloating && isFinite(Number(x)) && isFinite(Number(y))) {
-      root.moveFloatingWindow(sourceToplevel, destinationWorkspaceId,
-        x, y, areaWidth, areaHeight, grabRatioX, grabRatioY)
-    } else {
-      root.moveWindowToWorkspace(sourceToplevel, destinationWorkspaceId)
     }
   }
 
@@ -1517,7 +1598,14 @@ Item {
   }
 
   Timer {
-    id: reorderRefreshTimer
+    id: windowDropVerifyTimer
+    interval: 120
+    repeat: false
+    onTriggered: root.verifyPendingWindowDrop()
+  }
+
+  Timer {
+    id: dragRefreshTimer
     interval: 180
     repeat: false
     onTriggered: {
@@ -1534,43 +1622,7 @@ Item {
       waitForEnd: true
     }
     onExited: function(exitCode) {
-      var sourceAddress = root.pendingReorderSourceAddress
-      var targetAddress = root.pendingReorderTargetAddress
-      root.pendingReorderSourceAddress = ""
-      root.pendingReorderTargetAddress = ""
-
-      if (exitCode !== 0 || !sourceAddress || !targetAddress) return
-
-      var match = String(cursorProbeOutput.text || "").match(
-        /^\s*(-?\d+)\s*,\s*(-?\d+)\s*$/)
-      if (!match) {
-        console.warn("workspace overview: could not parse cursor position",
-          cursorProbeOutput.text)
-        return
-      }
-
-      var x = Number(match[1])
-      var y = Number(match[2])
-      if (!isFinite(x) || !isFinite(y) || Math.floor(x) !== x
-          || Math.floor(y) !== y || Math.abs(x) > root.maximumWorkspaceId
-          || Math.abs(y) > root.maximumWorkspaceId) {
-        console.warn("workspace overview: refusing invalid cursor position",
-          cursorProbeOutput.text)
-        return
-      }
-      try {
-        Hyprland.dispatch("hl.dsp.window.swap({ window = \"address:" + sourceAddress
-          + "\", target = \"address:" + targetAddress + "\" })")
-        // swap() warps the cursor. Restore only this one saved position; do
-        // not run a repeating restore timer, which fights normal input.
-        Hyprland.dispatch("hl.dsp.cursor.move({ x = " + String(x)
-          + ", y = " + String(y) + " })")
-        root.refreshAfterDrag = true
-        reorderRefreshTimer.restart()
-      } catch (e) {
-        console.warn("workspace overview: could not reorder windows",
-          sourceAddress, targetAddress, e)
-      }
+      root.finishTiledWindowSwap(exitCode, cursorProbeOutput.text)
     }
   }
 
@@ -2231,21 +2283,14 @@ Item {
                           onWindowSelected: function(toplevel) { root.selectWindow(toplevel) }
                           onWindowActivated: function(toplevel) { root.focusToplevel(toplevel) }
                           onWindowDropped: function(toplevel, x, y, grabRatioX, grabRatioY) {
-                            if (!root.wasFloatingAtDragStart(toplevel)) {
-                              root.finishTiledWindowDrop(toplevel, cardWorkspaceId,
-                                x, y, grabRatioX, grabRatioY, width, height)
-                            } else if (root.isFloatingWindow(toplevel)) {
-                              root.moveFloatingWindow(toplevel, cardWorkspaceId,
-                                x, y, width, height, grabRatioX, grabRatioY)
-                            } else {
-                              root.moveWindowToWorkspace(toplevel, cardWorkspaceId)
-                            }
+                            root.dropWindowOnWorkspace(toplevel, cardWorkspaceId,
+                              x, y, grabRatioX, grabRatioY, width, height)
                           }
                           onWindowDroppedOn: function(sourceToplevel, targetToplevel,
                                                       x, y, grabRatioX, grabRatioY) {
-                            root.handleWindowDrop(sourceToplevel, targetToplevel,
+                            root.dropWindowOnWorkspace(sourceToplevel,
                               cardWorkspaceId, x, y, grabRatioX, grabRatioY,
-                              width, height)
+                              width, height, targetToplevel)
                           }
                         }
                       }
@@ -2262,7 +2307,7 @@ Item {
                   + String(root.currentPage + 1) + "/"
                   + String(root.pageCountFor(root.workspaceEntries(root.workspaceRevision).length))
                   + "    •    swipe right for previous page    •    ?: show/hide shortcuts"
-                : "Click card: enter    Click thumbnail: focus    Left-drag: move/swap    Right-click: actions    ?: shortcuts"
+                : "Click card: enter    Click thumbnail: focus    Drag: move between workspaces; tiled windows swap on tiled drop; floating windows reposition    Right-click: actions    ?: shortcuts"
               color: Util.alpha(Color.menu.text, 0.58)
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
