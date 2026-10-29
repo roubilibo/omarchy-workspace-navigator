@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Effects
 import Quickshell
 import Quickshell.Wayland
 import qs.Commons
@@ -15,6 +16,7 @@ Rectangle {
   property var draggedToplevel: null
   property var selectedToplevel: null
   property bool liveCaptureEnabled: false
+  property bool workspaceFocused: false
 
   readonly property var waylandToplevel: toplevel ? toplevel.wayland : null
   // Some clients (notably GTK/Nautilus) expose the Hyprland address through
@@ -107,21 +109,33 @@ Rectangle {
     id: previewViewport
     anchors.fill: parent
     clip: true
+    layer.enabled: preview.hasContent
+    layer.smooth: true
+    layer.effect: MultiEffect {
+      maskEnabled: true
+      maskSource: roundedPreviewMask
+      maskThresholdMin: 0.3
+      maskSpreadAtMin: 0.3
+    }
 
-    // ScreencopyView preserves the source aspect ratio while painting. Keep
-    // its own frame at the native source ratio, then stretch that frame to
-    // the projected workspace rectangle so the card has no letterbox gaps.
+    // Fill the projected window geometry without distorting the capture.
+    // Scale uniformly to cover the viewport and let its clip trim the excess.
     Item {
       id: previewFrame
       width: preview.hasContent && preview.sourceSize.width > 0
         ? preview.sourceSize.width : parent.width
       height: preview.hasContent && preview.sourceSize.height > 0
         ? preview.sourceSize.height : parent.height
+      readonly property real coverScale: Math.max(
+        previewViewport.width / Math.max(1, width),
+        previewViewport.height / Math.max(1, height))
+      x: (previewViewport.width - width * coverScale) / 2
+      y: (previewViewport.height - height * coverScale) / 2
       transform: Scale {
         origin.x: 0
         origin.y: 0
-        xScale: previewViewport.width / Math.max(1, previewFrame.width)
-        yScale: previewViewport.height / Math.max(1, previewFrame.height)
+        xScale: previewFrame.coverScale
+        yScale: previewFrame.coverScale
       }
 
       ScreencopyView {
@@ -160,15 +174,29 @@ Rectangle {
     }
   }
 
+  Item {
+    id: roundedPreviewMask
+    anchors.fill: previewViewport
+    visible: false
+    layer.enabled: preview.hasContent
+
+    Rectangle {
+      anchors.fill: parent
+      radius: root.radius
+      color: "white"
+      antialiasing: true
+    }
+  }
+
   Rectangle {
     anchors.fill: parent
     z: 5
-    border.width: previewHover.hovered || root.dragging || root.selected
+    border.width: Math.max(1, Style.normalBorderWidth)
+      + (root.workspaceFocused ? Style.space(1) : 0)
+    border.color: previewHover.hovered || root.dragging || root.selected
       || windowDropArea.containsDrag
-      ? Math.max(1, Style.normalBorderWidth) : 0
-    border.color: root.dragging || windowDropArea.containsDrag
-      ? Color.accent : (root.selected ? Color.accent
-        : Util.alpha(Color.menu.text, 0.62))
+      ? Color.accent
+      : Util.alpha(Color.menu.text, 0.62)
     color: root.selected && !root.dragging && !windowDropArea.containsDrag
       ? Util.alpha(Color.accent, 0.22) : "transparent"
     radius: root.radius

@@ -225,6 +225,7 @@ BorderSurface {
           isGroup: Boolean(modelData && modelData.isGroup)
           groupMembers: modelData && modelData.members ? modelData.members : []
           liveCaptureEnabled: root.livePreviews && root.visible
+          workspaceFocused: root.focused
           draggedToplevel: root.draggedToplevel
           selectedToplevel: root.selectedToplevel
           onDragStarted: root.windowDragStarted(previewToplevel)
