@@ -230,12 +230,15 @@ Rectangle {
             y: root.cardY(index)
 
             AltTabPreview {
+              id: previewCard
               anchors.centerIn: parent
               readonly property real aspectRatio:
                 sourceWidth / Math.max(1, sourceHeight)
               width: Math.min(parent.width,
-                Math.max(1, parent.height - Style.space(64)) * aspectRatio)
-              height: width / Math.max(0.01, aspectRatio) + Style.space(64)
+                Math.max(1, parent.height - previewCard.metadataHeight)
+                  * aspectRatio)
+              height: width / Math.max(0.01, aspectRatio)
+                + previewCard.metadataHeight
               toplevel: modelData
               selected: index === root.selectedIndex
               workspaceLabel: root.workspaceLabelFor

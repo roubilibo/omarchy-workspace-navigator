@@ -12,10 +12,12 @@ Rectangle {
   property string workspaceLabel: ""
   signal activated()
 
-  // Keep the caption area stable while the preview itself follows the
-  // compositor window ratio. A variable caption height made short cards look
-  // as if the screenshot was clipped at the top and bottom.
-  readonly property real metadataHeight: Math.min(Style.space(64), Math.max(1, height))
+  // Keep the compact caption area stable while the preview follows the
+  // compositor window ratio.
+  readonly property real metadataHeight: Math.max(Style.space(40),
+    metadataTextColumn.implicitHeight + 2 * root.metadataVerticalPadding)
+  readonly property real metadataVerticalPadding: Style.space(4)
+  readonly property real metadataTextGap: Style.space(1)
   readonly property var waylandToplevel: toplevel ? toplevel.wayland : null
   readonly property real sourceWidth: root.sourceDimension(0)
   readonly property real sourceHeight: root.sourceDimension(1)
@@ -119,9 +121,9 @@ Rectangle {
         id: appIcon
         visible: root.iconSource !== ""
         anchors.left: parent.left
-        anchors.leftMargin: Style.space(10)
+        anchors.leftMargin: Style.space(6)
         anchors.verticalCenter: parent.verticalCenter
-        width: Style.space(26)
+        width: Style.space(16)
         height: width
         source: root.iconSource
         fillMode: Image.PreserveAspectFit
@@ -129,33 +131,36 @@ Rectangle {
         smooth: true
       }
 
-      Text {
+      Column {
+        id: metadataTextColumn
         anchors.left: appIcon.visible ? appIcon.right : parent.left
-        anchors.leftMargin: Style.space(10)
+        anchors.leftMargin: Style.space(6)
         anchors.right: parent.right
-        anchors.rightMargin: Style.space(10)
-        anchors.top: parent.top
-        anchors.topMargin: Style.space(10)
-        text: root.title
-        color: Color.menu.text
-        font.family: Style.font.family
-        font.pixelSize: Style.font.bodySmall
-        font.bold: true
-        elide: Text.ElideRight
-      }
+        anchors.rightMargin: Style.space(6)
+        anchors.verticalCenter: parent.verticalCenter
+        spacing: root.metadataTextGap
 
-      Text {
-        anchors.left: appIcon.visible ? appIcon.right : parent.left
-        anchors.leftMargin: Style.space(10)
-        anchors.right: parent.right
-        anchors.rightMargin: Style.space(10)
-        anchors.bottom: parent.bottom
-        anchors.bottomMargin: Style.space(10)
-        text: root.workspaceLabel
-        color: Util.alpha(Color.menu.text, 0.62)
-        font.family: Style.font.family
-        font.pixelSize: Style.font.bodySmall
-        elide: Text.ElideRight
+        Text {
+          id: titleText
+          width: metadataTextColumn.width
+          text: root.title
+          color: Color.menu.text
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+          font.bold: true
+          elide: Text.ElideRight
+        }
+
+        Text {
+          id: workspaceText
+          width: metadataTextColumn.width
+          text: root.workspaceLabel
+          color: Util.alpha(Color.menu.text, 0.62)
+          font.family: Style.font.family
+          font.pixelSize: Math.max(Style.space(8),
+            Style.font.caption - Style.space(1))
+          elide: Text.ElideRight
+        }
       }
     }
   }
