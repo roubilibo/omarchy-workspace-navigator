@@ -132,6 +132,30 @@ function workspaceTransform(monitor, screen, areaWidth, areaHeight) {
   }
 }
 
+function workspacePosition(monitor, screen, areaWidth, areaHeight,
+                           areaX, areaY, grabRatioX, grabRatioY,
+                           windowWidth, windowHeight) {
+  var transform = workspaceTransform(monitor, screen, areaWidth, areaHeight)
+  var x = finiteNumber(areaX)
+  var y = finiteNumber(areaY)
+  var ratioX = clamp(finiteNumber(grabRatioX) || 0, 0, 1)
+  var ratioY = clamp(finiteNumber(grabRatioY) || 0, 0, 1)
+  var width = Math.max(1, finiteNumber(windowWidth) || 1)
+  var height = Math.max(1, finiteNumber(windowHeight) || 1)
+  if (!transform || !isFinite(x) || !isFinite(y)) return null
+
+  var positionX = transform.originX + (x - transform.offsetX) / transform.scale
+    - ratioX * width
+  var positionY = transform.originY + (y - transform.offsetY) / transform.scale
+    - ratioY * height
+  return {
+    x: Math.round(clamp(positionX, transform.originX,
+      Math.max(transform.originX, transform.originX + transform.usableWidth - width))),
+    y: Math.round(clamp(positionY, transform.originY,
+      Math.max(transform.originY, transform.originY + transform.usableHeight - height)))
+  }
+}
+
 function previewGeometry(ipcObject, monitor, screen, areaWidth, areaHeight,
                          minimumWidth, minimumHeight) {
   var client = clientGeometry(ipcObject)

@@ -8,6 +8,7 @@ import qs.Commons
 import qs.Ui
 import "components"
 import "lib/WindowModel.js" as WindowModel
+import "lib/WindowGeometry.js" as WindowGeometry
 
 // Omarchy Shell workspace overview.
 //
@@ -1029,6 +1030,63 @@ Item {
     }
   }
 
+  function isFloatingWindow(toplevel) {
+    var ipc = toplevel && toplevel.lastIpcObject
+    return Boolean(ipc && ipc.floating === true)
+  }
+
+  function moveFloatingWindow(toplevel, workspaceId, areaX, areaY,
+                               areaWidth, areaHeight, grabRatioX, grabRatioY) {
+    var address = root.normalizedAddress(toplevel)
+    var id = root.positiveWorkspaceId(workspaceId)
+    var ipc = toplevel && toplevel.lastIpcObject
+    var workspace = root.workspaceById(id, root.workspaceRevision)
+    var monitor = workspace && workspace.monitor
+      ? workspace.monitor : Hyprland.focusedMonitor
+    var screen = null
+    var screens = Quickshell.screens || []
+    for (var i = 0; i < screens.length; i++) {
+      if (screens[i] && monitor && screens[i].name === monitor.name) {
+        screen = screens[i]
+        break
+      }
+    }
+    var size = ipc && ipc.size ? ipc.size : null
+    if (!address || id < 1 || !monitor || !size || size.length < 2) return
+
+    var position = WindowGeometry.workspacePosition(monitor, screen,
+      areaWidth, areaHeight, areaX, areaY, grabRatioX, grabRatioY,
+      size[0], size[1])
+    if (!position) return
+
+    try {
+      var currentWorkspaceId = toplevel.workspace
+        ? root.positiveWorkspaceId(toplevel.workspace.id) : -1
+      if (currentWorkspaceId !== id) {
+        if (Hyprland.usingLua) {
+          Hyprland.dispatch("hl.dsp.window.move({ workspace = \"" + String(id)
+            + "\", window = \"address:" + address + "\", follow = false })")
+        } else {
+          Hyprland.dispatch("movetoworkspacesilent " + String(id)
+            + ",address:" + address)
+        }
+      }
+      if (Hyprland.usingLua) {
+        Hyprland.dispatch("hl.dsp.window.move({ x = " + String(position.x)
+          + ", y = " + String(position.y)
+          + ", relative = false, window = \"address:" + address + "\" })")
+      } else {
+        Hyprland.dispatch("movewindowpixel exact " + String(position.x) + " "
+          + String(position.y) + ",address:" + address)
+      }
+      try { Hyprland.refreshWorkspaces(); Hyprland.refreshToplevels() } catch (e) {}
+      root.workspaceRevision += 1
+    } catch (e) {
+      console.warn("workspace overview: could not position floating window",
+        address, id, e)
+    }
+  }
+
   function performWorkspaceDelete(workspaceId) {
     var id = root.positiveWorkspaceId(workspaceId)
     if (id < 1) return
@@ -1164,18 +1222,31 @@ Item {
     }
   }
 
-  function handleWindowDrop(sourceToplevel, targetToplevel, destinationWorkspaceId) {
+  function handleWindowDrop(sourceToplevel, targetToplevel, destinationWorkspaceId,
+                            x, y, grabRatioX, grabRatioY, areaWidth, areaHeight) {
     var sourceWorkspaceId = sourceToplevel && sourceToplevel.workspace
       ? root.positiveWorkspaceId(sourceToplevel.workspace.id) : -1
     var targetWorkspaceId = targetToplevel && targetToplevel.workspace
       ? root.positiveWorkspaceId(targetToplevel.workspace.id)
       : root.positiveWorkspaceId(destinationWorkspaceId)
 
-    if (targetToplevel && sourceWorkspaceId === targetWorkspaceId) {
-      root.reorderWindowTowards(sourceToplevel, targetToplevel)
+    var sourceFloating = root.isFloatingWindow(sourceToplevel)
+    var targetFloating = root.isFloatingWindow(targetToplevel)
+    if (sourceWorkspaceId === targetWorkspaceId) {
+      if (sourceFloating) {
+        root.moveFloatingWindow(sourceToplevel, destinationWorkspaceId,
+          x, y, areaWidth, areaHeight, grabRatioX, grabRatioY)
+      } else if (targetToplevel && !targetFloating) {
+        root.reorderWindowTowards(sourceToplevel, targetToplevel)
+      }
       return
     }
-    root.moveWindowToWorkspace(sourceToplevel, destinationWorkspaceId)
+    if (sourceFloating && isFinite(Number(x)) && isFinite(Number(y))) {
+      root.moveFloatingWindow(sourceToplevel, destinationWorkspaceId,
+        x, y, areaWidth, areaHeight, grabRatioX, grabRatioY)
+    } else {
+      root.moveWindowToWorkspace(sourceToplevel, destinationWorkspaceId)
+    }
   }
 
   function open(payloadJson) {
@@ -2022,11 +2093,19 @@ Item {
                           onWindowDragFinished: function(toplevel) { root.endWindowDrag(toplevel) }
                           onWindowSelected: function(toplevel) { root.selectWindow(toplevel) }
                           onWindowActivated: function(toplevel) { root.focusToplevel(toplevel) }
-                          onWindowDropped: function(toplevel) {
-                            root.moveWindowToWorkspace(toplevel, cardWorkspaceId)
+                          onWindowDropped: function(toplevel, x, y, grabRatioX, grabRatioY) {
+                            if (root.isFloatingWindow(toplevel)) {
+                              root.moveFloatingWindow(toplevel, cardWorkspaceId,
+                                x, y, width, height, grabRatioX, grabRatioY)
+                            } else {
+                              root.moveWindowToWorkspace(toplevel, cardWorkspaceId)
+                            }
                           }
-                          onWindowDroppedOn: function(sourceToplevel, targetToplevel) {
-                            root.handleWindowDrop(sourceToplevel, targetToplevel, cardWorkspaceId)
+                          onWindowDroppedOn: function(sourceToplevel, targetToplevel,
+                                                      x, y, grabRatioX, grabRatioY) {
+                            root.handleWindowDrop(sourceToplevel, targetToplevel,
+                              cardWorkspaceId, x, y, grabRatioX, grabRatioY,
+                              width, height)
                           }
                         }
                       }

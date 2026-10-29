@@ -31,6 +31,7 @@ BorderSurface {
   }
   readonly property int windowCount: root.effectiveToplevels.length
   readonly property bool occupied: root.windowCount > 0
+  readonly property bool hovered: cardHover.hovered
   // The workspace number is an overlay; it must not reserve preview space.
   readonly property real previewInset: 0
   readonly property real previewSpacing: Math.max(1, Number(Style.spacing.xs) || 2)
@@ -49,6 +50,9 @@ BorderSurface {
     && root.workspaceId > 0
     && root.draggedSourceWorkspaceId !== root.workspaceId
   readonly property bool dropHovered: root.validDropTarget && dropArea.containsDrag
+  readonly property bool draggedFloating: root.draggedToplevel
+    && root.draggedToplevel.lastIpcObject
+    && root.draggedToplevel.lastIpcObject.floating === true
 
   readonly property int activeBorderWidth: Math.max(Style.space(2), Style.focusBorderWidth)
   readonly property int normalBorderWidth: Math.max(1, Style.normalBorderWidth)
@@ -73,8 +77,10 @@ BorderSurface {
   signal windowDragFinished(var toplevel)
   signal windowSelected(var toplevel)
   signal windowActivated(var toplevel)
-  signal windowDropped(var toplevel)
-  signal windowDroppedOn(var sourceToplevel, var targetToplevel)
+  signal windowDropped(var toplevel, real x, real y,
+    real grabRatioX, real grabRatioY)
+  signal windowDroppedOn(var sourceToplevel, var targetToplevel,
+    real x, real y, real grabRatioX, real grabRatioY)
 
   function screenForMonitor(monitor) {
     if (!monitor) return root.previewScreen
@@ -224,7 +230,7 @@ BorderSurface {
           toplevel: previewToplevel
           isGroup: Boolean(modelData && modelData.isGroup)
           groupMembers: modelData && modelData.members ? modelData.members : []
-          liveCaptureEnabled: root.livePreviews && root.visible
+          liveCaptureEnabled: root.livePreviews && root.hovered && root.visible
           workspaceFocused: root.focused
           draggedToplevel: root.draggedToplevel
           selectedToplevel: root.selectedToplevel
@@ -232,8 +238,10 @@ BorderSurface {
           onDragFinished: root.windowDragFinished(previewToplevel)
           onWindowSelected: root.windowSelected(previewToplevel)
           onWindowActivated: root.windowActivated(previewToplevel)
-          onWindowDroppedOn: function(sourceToplevel, targetToplevel) {
-            root.windowDroppedOn(sourceToplevel, targetToplevel)
+          onWindowDroppedOn: function(sourceToplevel, targetToplevel,
+                                      x, y, grabRatioX, grabRatioY) {
+            root.windowDroppedOn(sourceToplevel, targetToplevel,
+              x, y, grabRatioX, grabRatioY)
           }
         }
       }
@@ -346,20 +354,30 @@ BorderSurface {
   DropArea {
     id: dropArea
     anchors.fill: parent
-    // This must sit above thumbnail DropAreas for cross-workspace moves.
-    // Thumbnail drops remain enabled only for same-workspace reordering.
-    z: 60
+    // Thumbnail drop targets stay above this area; it handles workspace moves
+    // and floating-window drops on otherwise empty parts of the card.
+    z: root.validDropTarget || root.draggedFloating ? 60 : 20
     keys: ["omarchy-window"]
-    enabled: root.validDropTarget && !root.addWorkspace
+    enabled: !root.addWorkspace && (root.validDropTarget
+      || (root.draggedFloating && root.draggedSourceWorkspaceId === root.workspaceId))
 
     onDropped: function(drop) {
-      if (!root.validDropTarget || !drop.source || !drop.source.toplevel) {
+      var sameWorkspaceFloating = root.draggedFloating
+        && root.draggedSourceWorkspaceId === root.workspaceId
+      if ((!root.validDropTarget && !sameWorkspaceFloating)
+          || !drop.source || !drop.source.toplevel) {
         drop.accepted = false
         return
       }
       drop.acceptProposedAction()
-      root.windowDropped(drop.source.toplevel)
+      root.windowDropped(drop.source.toplevel, drop.x, drop.y,
+        drop.source.dragGrabRatioX, drop.source.dragGrabRatioY)
     }
+  }
+
+  HoverHandler {
+    id: cardHover
+    onHoveredChanged: if (hovered) root.workspaceHovered()
   }
 
   // Window previews can reach the card edges in a no-gaps workspace and are

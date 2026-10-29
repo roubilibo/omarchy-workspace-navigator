@@ -17,6 +17,8 @@ Rectangle {
   property var selectedToplevel: null
   property bool liveCaptureEnabled: false
   property bool workspaceFocused: false
+  property real dragGrabRatioX: 0.5
+  property real dragGrabRatioY: 0.5
 
   readonly property var waylandToplevel: toplevel ? toplevel.wayland : null
   // Some clients (notably GTK/Nautilus) expose the Hyprland address through
@@ -37,7 +39,6 @@ Rectangle {
     && root.isSameToplevel(root.selectedToplevel, root.toplevel)
   readonly property string appId: root.appIdFor(toplevel)
   readonly property string title: root.titleFor(toplevel)
-  readonly property string iconSource: root.iconFor(toplevel)
 
   readonly property int maximumTitleLength: 512
 
@@ -45,7 +46,8 @@ Rectangle {
   signal dragFinished(var toplevel)
   signal windowSelected(var toplevel)
   signal windowActivated(var toplevel)
-  signal windowDroppedOn(var sourceToplevel, var targetToplevel)
+  signal windowDroppedOn(var sourceToplevel, var targetToplevel,
+    real x, real y, real grabRatioX, real grabRatioY)
 
   function appIdFor(top) {
     if (!top) return ""
@@ -72,14 +74,6 @@ Rectangle {
     if (title.length > root.maximumTitleLength)
       title = title.slice(0, root.maximumTitleLength - 1) + "…"
     return title
-  }
-
-  function iconFor(top) {
-    var id = appIdFor(top)
-    if (!id) return ""
-    var entry = DesktopEntries.byId(id) || DesktopEntries.heuristicLookup(id)
-    if (!entry || !entry.icon) return ""
-    return Quickshell.iconPath(entry.icon, true)
   }
 
   function isSameToplevel(left, right) {
@@ -148,20 +142,8 @@ Rectangle {
       }
     }
 
-    Image {
-      visible: !preview.hasContent && root.iconSource !== ""
-      anchors.centerIn: parent
-      width: Math.min(parent.width, parent.height) * 0.34
-      height: width
-      source: root.iconSource
-      fillMode: Image.PreserveAspectFit
-      asynchronous: true
-      smooth: true
-      opacity: 0.72
-    }
-
     Text {
-      visible: !preview.hasContent && root.iconSource === ""
+      visible: !preview.hasContent
       anchors.centerIn: parent
       width: parent.width - Style.space(16)
       text: root.title
@@ -218,7 +200,10 @@ Rectangle {
         return
       }
       drop.acceptProposedAction()
-      root.windowDroppedOn(drop.source.toplevel, root.toplevel)
+      var point = root.mapToItem(root.parent, drop.x, drop.y)
+      root.windowDroppedOn(drop.source.toplevel, root.toplevel,
+        point.x, point.y, drop.source.dragGrabRatioX,
+        drop.source.dragGrabRatioY)
     }
   }
 
@@ -330,6 +315,10 @@ Rectangle {
 
     onActiveChanged: {
       if (active) {
+        root.dragGrabRatioX = Math.max(0, Math.min(1,
+          previewDrag.centroid.pressPosition.x / Math.max(1, root.width)))
+        root.dragGrabRatioY = Math.max(0, Math.min(1,
+          previewDrag.centroid.pressPosition.y / Math.max(1, root.height)))
         dragProxy.dragSessionActive = true
         root.dragStarted(root.toplevel)
       } else if (dragProxy.dragSessionActive) {
