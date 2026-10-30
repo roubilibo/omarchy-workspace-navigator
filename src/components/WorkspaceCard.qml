@@ -19,6 +19,7 @@ BorderSurface {
   property bool deletable: false
   property bool keyboardSelected: false
   property var draggedToplevel: null
+  property var geometryOverrides: ({})
   property Item dragOverlay: null
   property var selectedToplevel: null
   property bool livePreviews: false
@@ -203,9 +204,13 @@ BorderSurface {
 
           readonly property var previewToplevel: modelData && modelData.toplevel
             ? modelData.toplevel : modelData
-          readonly property var previewIpc: modelData && modelData.lastIpcObject
-            ? modelData.lastIpcObject
-            : (previewToplevel ? previewToplevel.lastIpcObject : null)
+          readonly property var previewIpc: {
+            var address = WindowModel.toplevelAddress(previewToplevel)
+            var override = address ? root.geometryOverrides[address] : null
+            return override || (modelData && modelData.lastIpcObject
+              ? modelData.lastIpcObject
+              : (previewToplevel ? previewToplevel.lastIpcObject : null))
+          }
           readonly property bool previewFloating: previewIpc
             && previewIpc.floating === true
           readonly property var targetMonitor: root.workspaceMonitor
@@ -224,8 +229,8 @@ BorderSurface {
 
           x: dragging ? dragStartX + dragTranslationX : displayGeometry.x
           y: dragging ? dragStartY + dragTranslationY : displayGeometry.y
-          width: Math.max(1, displayGeometry.width)
-          height: Math.max(1, displayGeometry.height)
+          width: Math.max(1, dragging ? dragStartWidth : displayGeometry.width)
+          height: Math.max(1, dragging ? dragStartHeight : displayGeometry.height)
           // Hyprland paints floating clients above tiled clients. Keep the
           // navigator's stacking order consistent even when the IPC model
           // lists a floating client before a fullscreen-sized tiled client.

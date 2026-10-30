@@ -35,9 +35,10 @@ Item {
   // rebuilt while the panel is open.
   property int workspaceRevision: 0
   property var draggedToplevel: null
-  // Workspace moves change the toplevel model. Defer rebuilding the
-  // thumbnail Repeater until Qt's native drag session is done so the pointer
-  // does not jump to new thumbnail geometry during teardown.
+  property var dragGeometryOverrides: ({})
+  // Workspace moves change the toplevel model. Keep the thumbnail Repeater
+  // stable through the overview drag; sibling preview geometry is updated
+  // separately so the dragged delegate and pointer stay attached.
   property bool refreshAfterDrag: false
   property var dragStartState: null
   property var pendingFloatingDragMove: null
@@ -999,6 +1000,7 @@ Item {
   function beginWindowDrag(toplevel) {
     root.refreshAfterDrag = false
     root.draggedToplevel = toplevel
+    root.dragGeometryOverrides = ({})
     var ipc = toplevel && toplevel.lastIpcObject
     var address = root.normalizedAddress(toplevel)
     var workspaceId = toplevel && toplevel.workspace
@@ -1008,7 +1010,50 @@ Item {
     root.dragStartState = address && workspaceId > 0
       ? ({ address: address, floating: Boolean(ipc && ipc.floating === true),
            x: x, y: y, hasPosition: isFinite(x) && isFinite(y),
-           workspaceId: workspaceId }) : null
+           workspaceId: workspaceId, temporarilyFloated: false }) : null
+
+    // Hyprland's native tiled drag first detaches the window from the layout.
+    // That makes the remaining tiles reflow while the window is being moved.
+    // The overview moves its thumbnail itself, so mirror only this layout
+    // transition and restore the original tiled state after the drop.
+    if (root.dragStartState && !root.dragStartState.floating
+        && root.setWindowFloating(address, true)) {
+      root.dragStartState.temporarilyFloated = true
+      Qt.callLater(function() {
+        if (root.draggedToplevel === toplevel && root.dragStartState
+            && root.dragStartState.temporarilyFloated
+            && !dragGeometryProbe.running)
+          dragGeometryProbe.running = true
+      })
+    }
+  }
+
+  function updateDragGeometryOverrides(exitCode, output) {
+    if (exitCode !== 0 || !root.draggedToplevel || !root.dragStartState
+        || !root.dragStartState.temporarilyFloated)
+      return
+
+    var clients = null
+    try { clients = JSON.parse(String(output || "")) } catch (e) { return }
+    if (!Array.isArray(clients)) return
+
+    var overrides = {}
+    for (var i = 0; i < clients.length; i++) {
+      var client = clients[i]
+      var address = root.normalizedAddress(client)
+      var at = client && client.at
+      var size = client && client.size
+      if (!address || !at || at.length < 2 || !size || size.length < 2) continue
+      var x = Number(at[0]), y = Number(at[1])
+      var width = Number(size[0]), height = Number(size[1])
+      if (!isFinite(x) || !isFinite(y) || !isFinite(width) || !isFinite(height)
+          || width <= 0 || height <= 0)
+        continue
+      overrides[address] = {
+        at: [x, y], size: [width, height], floating: client.floating === true
+      }
+    }
+    root.dragGeometryOverrides = overrides
   }
 
   function endWindowDrag(toplevel) {
@@ -1021,6 +1066,8 @@ Item {
           && root.dragStartState.hasPosition)
         root.dispatchWindowPosition(root.dragStartState.address,
           { x: root.dragStartState.x, y: root.dragStartState.y })
+      else if (!dropPending && root.dragStartState.temporarilyFloated)
+        root.setWindowFloating(root.dragStartState.address, false)
       root.refreshAfterDrag = true
     }
     if (!root.draggedToplevel || root.draggedToplevel === toplevel)
@@ -1107,6 +1154,11 @@ Item {
     var swap = root.pendingTiledSwap
     root.pendingTiledSwap = null
     if (exitCode !== 0 || !swap) return
+
+    // A tiled source may have been temporarily floated during the overview
+    // drag. Refresh after it is restored so validation sees the current
+    // floating state rather than the model snapshot from drag start.
+    try { Hyprland.refreshToplevels() } catch (e) {}
 
     var match = String(cursorPosition || "").match(
       /^\s*(-?\d+)\s*,\s*(-?\d+)\s*$/)
@@ -1320,8 +1372,11 @@ Item {
     // Same-workspace tiled drops target a concrete tile, so swap layout slots
     // while leaving both windows tiled. Drops on floating targets are ignored.
     if (!state.floating && state.workspaceId === id) {
-      if (targetToplevel && !root.isFloatingWindow(targetToplevel))
+      if (targetToplevel && !root.isFloatingWindow(targetToplevel)) {
+        if (state.temporarilyFloated)
+          root.setWindowFloating(state.address, false)
         root.swapTiledWindows(toplevel, targetToplevel)
+      }
       return true
     }
 
@@ -1343,6 +1398,8 @@ Item {
       if (state.workspaceId !== id)
         root.dispatchWorkspaceMove(state.address, id)
       if (position) root.dispatchWindowPosition(state.address, position)
+      if (state.temporarilyFloated)
+        root.setWindowFloating(state.address, state.floating)
       root.refreshAfterWindowAction(toplevel)
       windowDropVerifyTimer.start()
       return true
@@ -1610,7 +1667,20 @@ Item {
     repeat: false
     onTriggered: {
       try { Hyprland.refreshToplevels() } catch (e) {}
+      root.dragGeometryOverrides = ({})
       root.workspaceRevision += 1
+    }
+  }
+
+  Process {
+    id: dragGeometryProbe
+    command: ["hyprctl", "clients", "-j"]
+    stdout: StdioCollector {
+      id: dragGeometryProbeOutput
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      root.updateDragGeometryOverrides(exitCode, dragGeometryProbeOutput.text)
     }
   }
 
@@ -1819,9 +1889,8 @@ Item {
       if (name === "closewindow") root.forgetAltTabWindow(event)
       if (!root.opened && !root.altTabOpen) return
 
-      // Keep the delegate tree stable until the native drag session has
-      // released the pointer. The final refresh is scheduled by
-      // endWindowDrag().
+      // Keep the delegate tree stable until the overview drag releases its
+      // pointer. The final refresh is scheduled by endWindowDrag().
       if (root.opened && root.draggedToplevel !== null && !root.altTabOpen) {
         root.refreshAfterDrag = true
         return
@@ -2255,6 +2324,7 @@ Item {
                             && Hyprland.focusedWorkspace.id === cardWorkspaceId
                           keyboardSelected: root.selectedIndex === absoluteIndex
                           draggedToplevel: root.draggedToplevel
+                          geometryOverrides: root.dragGeometryOverrides
                           selectedToplevel: root.selectedToplevel
                           dragOverlay: dragPreviewOverlay
                           livePreviews: root.opened && panelWindow.visible

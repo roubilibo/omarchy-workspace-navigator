@@ -23,6 +23,8 @@ Rectangle {
   property real dragGrabRatioY: 0.5
   property real dragStartX: 0
   property real dragStartY: 0
+  property real dragStartWidth: 1
+  property real dragStartHeight: 1
   property real dragLastTranslationX: 0
   property real dragLastTranslationY: 0
 
@@ -332,6 +334,8 @@ Rectangle {
         root.dragStartY = start.y
         root.dragLastTranslationX = 0
         root.dragLastTranslationY = 0
+        root.dragStartWidth = root.width
+        root.dragStartHeight = root.height
         root.dragGrabRatioX = Math.max(0, Math.min(1,
           previewDrag.centroid.pressPosition.x / Math.max(1, root.width)))
         root.dragGrabRatioY = Math.max(0, Math.min(1,
