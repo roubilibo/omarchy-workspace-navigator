@@ -16,7 +16,7 @@ https://github.com/user-attachments/assets/05c1dcf1-332a-4b1e-b2d7-3017d8340ca5
 - Left-click a window thumbnail to focus it.
 - Right-click a workspace for rename, persistence, move, and delete actions.
 - Drag windows between workspaces.
-- Drag floating windows freely within a workspace; reorder tiled windows by dropping them on other tiled windows.
+- Drag floating windows freely within a workspace; tiled previews reflow during drag and reorder when dropped on another tiled window.
 - Create and delete empty workspaces above workspace 8.
 - Alt+Tab switcher with live window previews.
 - Alt+Tab previews preserve each window's original aspect ratio.
@@ -45,7 +45,7 @@ Horizontal two-finger touchpad swipes page through the workspace overview.
 - Click a workspace card to focus it.
 - Click a window thumbnail to focus that window.
 - Drag a floating thumbnail to reposition it, or drag any thumbnail to another workspace to move it.
-- Drop a tiled thumbnail on another tiled thumbnail in the same workspace to reorder them; floating/tiled state is preserved.
+- Tiled previews reflow while dragging; drop on another tiled thumbnail in the same workspace to reorder them. Floating/tiled state is restored after the drop.
 - Right-click a workspace card to open its action menu.
 
 The setting is saved automatically. It can also be opened directly with:
