@@ -381,5 +381,23 @@ Rectangle {
     Drag.proposedAction: Qt.MoveAction
   }
 
-  parent: root.dragging && root.dragOverlay ? root.dragOverlay : root.homeParent
+  // Keep the pointer-grabbing item under its original parent for the whole
+  // gesture. Reparenting it on drag start cancels DragHandler's pointer grab
+  // on some Qt Quick backends. Keep the copy outside the source subtree so its
+  // live snapshot cannot recurse back into itself.
+  ShaderEffectSource {
+    id: dragVisual
+    parent: root.dragOverlay
+    x: root.dragging ? root.dragStartX + root.dragTranslationX : 0
+    y: root.dragging ? root.dragStartY + root.dragTranslationY : 0
+    width: root.width
+    height: root.height
+    z: 1000000
+    visible: root.dragging && root.dragOverlay !== null
+    sourceItem: root
+    live: root.dragging
+    hideSource: root.dragging
+  }
+
+  parent: root.homeParent
 }

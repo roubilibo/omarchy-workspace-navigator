@@ -86,6 +86,14 @@ BorderSurface {
   signal windowDroppedOn(var sourceToplevel, var targetToplevel,
     real x, real y, real grabRatioX, real grabRatioY)
 
+  function isSameToplevel(left, right) {
+    if (!left || !right) return false
+    if (left === right) return true
+    var leftAddress = WindowModel.toplevelAddress(left)
+    var rightAddress = WindowModel.toplevelAddress(right)
+    return leftAddress !== "" && leftAddress === rightAddress
+  }
+
   function screenForMonitor(monitor) {
     if (!monitor) return root.previewScreen
     var screens = Quickshell.screens || []
@@ -227,8 +235,8 @@ BorderSurface {
             : WindowGeometry.fallbackGeometry(index, root.windowCount,
               spatialPreview.width, spatialPreview.height, root.previewSpacing)
 
-          x: dragging ? dragStartX + dragTranslationX : displayGeometry.x
-          y: dragging ? dragStartY + dragTranslationY : displayGeometry.y
+          x: displayGeometry.x
+          y: displayGeometry.y
           width: Math.max(1, dragging ? dragStartWidth : displayGeometry.width)
           height: Math.max(1, dragging ? dragStartHeight : displayGeometry.height)
           // Hyprland paints floating clients above tiled clients. Keep the

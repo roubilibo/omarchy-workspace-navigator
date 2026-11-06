@@ -42,6 +42,8 @@ Item {
   property bool refreshAfterDrag: false
   property var dragStartState: null
   property var pendingFloatingDragMove: null
+  property string pendingTiledRestoreAddress: ""
+  property int pendingTiledRestoreAttempts: 0
   property var pendingWindowDrop: null
   property var pendingTiledSwap: null
   property int pendingWorkspaceCreateId: -1
@@ -1033,8 +1035,13 @@ Item {
           && root.dragStartState.hasPosition)
         root.dispatchWindowPosition(root.dragStartState.address,
           { x: root.dragStartState.x, y: root.dragStartState.y })
-      else if (!dropPending && root.dragStartState.temporarilyFloated)
+      else if (root.dragStartState.temporarilyFloated) {
+        // A workspace drop issues its first restore while DropArea is handling
+        // the release. Repeat it here after DragHandler has fully ended; the
+        // drag teardown can otherwise leave the compositor window floating.
         root.setWindowFloating(root.dragStartState.address, false)
+        root.verifyTiledRestore(root.dragStartState.address)
+      }
       root.refreshAfterDrag = true
     }
     if (!root.draggedToplevel || root.draggedToplevel === toplevel)
@@ -1044,6 +1051,47 @@ Item {
       root.refreshAfterDrag = false
       dragRefreshTimer.restart()
     }
+  }
+
+  function verifyTiledRestore(address) {
+    if (!address) return
+    root.pendingTiledRestoreAddress = address
+    root.pendingTiledRestoreAttempts = 0
+    if (!tiledRestoreProbe.running) tiledRestoreProbe.running = true
+  }
+
+  function finishTiledRestoreProbe(exitCode, output) {
+    var address = root.pendingTiledRestoreAddress
+    if (!address) return
+    var clients = null
+    try { clients = exitCode === 0 ? JSON.parse(String(output || "")) : null }
+    catch (e) {}
+    var current = null
+    if (Array.isArray(clients)) {
+      for (var i = 0; i < clients.length; i++) {
+        if (root.normalizedAddress(clients[i]) === address) {
+          current = clients[i]
+          break
+        }
+      }
+    }
+
+    if (current && current.floating !== true) {
+      root.pendingTiledRestoreAddress = ""
+      root.pendingTiledRestoreAttempts = 0
+      return
+    }
+
+    root.pendingTiledRestoreAttempts += 1
+    if (root.pendingTiledRestoreAttempts >= 3) {
+      console.warn("workspace overview: tiled state restoration could not be verified",
+        address)
+      root.pendingTiledRestoreAddress = ""
+      root.pendingTiledRestoreAttempts = 0
+      return
+    }
+    if (current) root.setWindowFloating(address, false)
+    tiledRestoreRetryTimer.restart()
   }
 
   function moveWindowToWorkspace(toplevel, workspaceId) {
@@ -1619,6 +1667,16 @@ Item {
   }
 
   Timer {
+    id: tiledRestoreRetryTimer
+    interval: 100
+    repeat: false
+    onTriggered: {
+      if (!tiledRestoreProbe.running && root.pendingTiledRestoreAddress !== "")
+        tiledRestoreProbe.running = true
+    }
+  }
+
+  Timer {
     id: windowDropVerifyTimer
     interval: 120
     repeat: false
@@ -1645,6 +1703,15 @@ Item {
     }
     onExited: function(exitCode) {
       root.updateDragGeometryOverrides(exitCode, dragGeometryProbeOutput.text)
+    }
+  }
+
+  Process {
+    id: tiledRestoreProbe
+    command: ["hyprctl", "clients", "-j"]
+    stdout: StdioCollector { id: tiledRestoreProbeOutput; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.finishTiledRestoreProbe(exitCode, tiledRestoreProbeOutput.text)
     }
   }
 
