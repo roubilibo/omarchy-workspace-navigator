@@ -95,32 +95,11 @@ Item {
   readonly property int overviewColumns: 3
   readonly property int cardsPerPage: 9
   readonly property int cardGap: Style.space(12)
-  // Keep the sampling radius modest and spend more passes on a smoother
-  // result; a large radius with too few passes can expose blocky artifacts.
-  readonly property int micaBlurSize: 6
-  readonly property int micaBlurPasses: 4
-  property bool blurEnabled: false
-  property bool blurBaseEnabled: true
-  property int blurBaseSize: 8
-  property int blurBasePasses: 1
-  property bool blurBaseStateKnown: false
-  property bool blurApplyPending: false
-  readonly property bool overviewBlurRequested: root.blurEnabled && root.opened
-    && !root.settingsMode && !root.altTabOpen
-  readonly property bool altTabBlurRequested: root.blurEnabled
-    && root.altTabOverlayVisible
-  readonly property bool anyBlurRequested: root.overviewBlurRequested
-    || root.altTabBlurRequested
   readonly property var settingsOptions: [
     {
       kind: "altTab",
       label: "Alt+Tab: All Workspaces",
       description: "Include windows from every workspace. Off uses the current workspace."
-    },
-    {
-      kind: "blur",
-      label: "Background Blur",
-      description: "Blur the desktop behind the overview and Alt+Tab panel."
     }
   ]
   readonly property string settingsPath:
@@ -134,46 +113,42 @@ Item {
   property bool settingsWriteDirty: false
   property string launcherMenuWriteText: ""
   property bool launcherMenuWriteDirty: false
-  readonly property string blurEvalCommand:
-    'workspaceNavigatorBlurRule = workspaceNavigatorBlurRule or '
-    + 'hl.layer_rule({ name = "workspace-navigator-blur", '
-    + 'match = { namespace = "^roubilibo-workspace-navigator$" }, blur = true }); '
-    + 'workspaceNavigatorBlurRule:set_enabled('
-    + (root.overviewBlurRequested ? "true" : "false") + '); '
-    + 'workspaceNavigatorAltTabBlurRule = workspaceNavigatorAltTabBlurRule or '
-    + 'hl.layer_rule({ name = "workspace-navigator-alt-tab-blur", '
-    + 'match = { namespace = "^roubilibo-workspace-navigator-alt-tab$" }, blur = true }); '
-    + 'workspaceNavigatorAltTabBlurRule:set_enabled('
-    + (root.altTabBlurRequested ? "true" : "false") + '); '
-    + 'hl.config({ decoration = { blur = { enabled = '
-    + (root.anyBlurRequested || root.blurBaseEnabled ? "true" : "false")
-    + ', size = ' + String(root.anyBlurRequested
-      ? root.micaBlurSize : root.blurBaseSize)
-    + ', passes = ' + String(root.anyBlurRequested
-      ? root.micaBlurPasses : root.blurBasePasses)
-    + ' } } })'
+  property bool windowOpacityModeKnown: false
+  property bool glassyWindowMode: false
+  property bool windowOpacityProbePending: false
+  property bool glassyRuleApplyPending: false
+  readonly property string glassyRuleEvalCommand:
+    'workspaceNavigatorGlassyRule = workspaceNavigatorGlassyRule or '
+    + 'hl.layer_rule({ name = "workspace-navigator-glassy", '
+    + 'match = { namespace = "^roubilibo-workspace-navigator$" }, '
+    + 'blur = true, ignore_alpha = 0.3 }); '
+    + 'workspaceNavigatorGlassyRule:set_enabled('
+    + (root.glassyWindowMode ? "true" : "false") + '); '
+    + 'workspaceNavigatorAltTabGlassyRule = workspaceNavigatorAltTabGlassyRule or '
+    + 'hl.layer_rule({ name = "workspace-navigator-alt-tab-glassy", '
+    + 'match = { namespace = "^roubilibo-workspace-navigator-alt-tab$" }, '
+    + 'blur = true, ignore_alpha = 0.3 }); '
+    + 'workspaceNavigatorAltTabGlassyRule:set_enabled('
+    + (root.glassyWindowMode ? "true" : "false") + ')'
   readonly property string launcherMenuDirectory:
     Quickshell.env("HOME") + "/.config/omarchy/extensions"
   readonly property string launcherMenuPath:
     root.launcherMenuDirectory + "/omarchy-menu.jsonc"
   readonly property string launcherMenuEntryText:
     '  "setup.workspace-navigator": {"icon":"󰒓","label":"Workspace Navigator",'
-    + '"description":"Configure Alt+Tab scope and background blur",'
+    + '"description":"Configure Alt+Tab scope",'
     + '"action":"omarchy-shell roubilibo.workspace-navigator settings"}'
   function loadSettings(raw) {
     try {
       var settings = JSON.parse(String(raw || "{}"))
       if (settings.altTabScope === "all" || settings.altTabScope === "workspace")
         root.altTabScope = settings.altTabScope
-      root.blurEnabled = settings.blurEnabled === true
-      root.applyBlurState()
     } catch (e) {}
   }
 
   function saveSettings() {
     root.settingsWriteText = JSON.stringify({
-      altTabScope: root.altTabScope,
-      blurEnabled: root.blurEnabled
+      altTabScope: root.altTabScope
     }, null, 2) + "\n"
     root.settingsWriteDirty = true
     if (!settingsWriteProcess.running) root.startSettingsWrite()
@@ -190,28 +165,6 @@ Item {
     root.settingsSelection = 0
     root.saveSettings()
     return "ok"
-  }
-
-  function setBlurEnabled(value) {
-    root.blurEnabled = Boolean(value)
-    root.settingsSelection = 1
-    root.saveSettings()
-    root.applyBlurState()
-    return "ok"
-  }
-
-  function applyBlurState() {
-    if (!root.blurBaseStateKnown) {
-      root.blurApplyPending = true
-      if (!blurBaseProbe.running) blurBaseProbe.running = true
-      return
-    }
-    if (blurApplyProcess.running) {
-      root.blurApplyPending = true
-      return
-    }
-    root.blurApplyPending = false
-    blurApplyProcess.running = true
   }
 
   function openSettings() {
@@ -231,8 +184,6 @@ Item {
     if (option.kind === "altTab")
       root.setAltTabScope(root.altTabScope === "all"
         ? "workspace" : "all")
-    else if (option.kind === "blur")
-      root.setBlurEnabled(!root.blurEnabled)
   }
 
   function activateSettingsSelection() {
@@ -251,8 +202,8 @@ Item {
       // Update only the description previously generated by this plugin,
       // preserving other entries and user edits in the menu extension.
       var updated = current.replace(
-        /("setup\.workspace-navigator"\s*:\s*\{[^}]*?"description"\s*:\s*)"Configure (?:swipe behavior, Alt\+Tab scope, and blur|swipe behavior and background blur|Alt\+Tab scope and overview blur)"/,
-        '$1"Configure Alt+Tab scope and background blur"')
+        /("setup\.workspace-navigator"\s*:\s*\{[^}]*?"description"\s*:\s*)"Configure (?:swipe behavior, Alt\+Tab scope, and blur|swipe behavior and background blur|Alt\+Tab scope and overview blur|Alt\+Tab scope and background blur)"/,
+        '$1"Configure Alt+Tab scope"')
       if (updated !== current) root.writeLauncherMenu(updated)
       return
     }
@@ -308,12 +259,31 @@ Item {
     launcherMenuWriteProcess.running = true
   }
 
+  function refreshWindowOpacityMode() {
+    if (windowOpacityModeProbe.running) {
+      root.windowOpacityProbePending = true
+      return
+    }
+    root.windowOpacityProbePending = false
+    windowOpacityModeProbe.running = true
+  }
+
+  function applyWindowOpacityMode() {
+    if (!root.windowOpacityModeKnown) return
+    if (glassyRuleApplyProcess.running) {
+      root.glassyRuleApplyPending = true
+      return
+    }
+    root.glassyRuleApplyPending = false
+    glassyRuleApplyProcess.running = true
+  }
+
   Component.onCompleted: {
     settingsReadProcess.running = true
     launcherMenuReadProcess.running = true
     bindingSyncProcess.running = true
     root.rememberAltTabFocus(Hyprland.activeToplevel)
-    root.applyBlurState()
+    root.refreshWindowOpacityMode()
   }
 
   function workspaceById(id, revision) {
@@ -780,7 +750,6 @@ Item {
       if (!altTabPendingCommitTimer.running)
         altTabPendingCommitTimer.start()
     }
-    root.applyBlurState()
   }
 
   function clearPendingAltTabCommit() {
@@ -816,7 +785,6 @@ Item {
     root.altTabSnapshot = []
     root.altTabDeferredFocusAddress = ""
     root.selectedToplevel = null
-    root.applyBlurState()
     root.focusToplevel(selected)
   }
 
@@ -831,7 +799,6 @@ Item {
     root.altTabCandidates = []
     root.altTabSnapshot = []
     root.selectedToplevel = null
-    root.applyBlurState()
     if (applyDeferredFocus && deferred)
       root.rememberAltTabAddress(deferred)
   }
@@ -1540,7 +1507,6 @@ Item {
     root.showKeybindHint = false
     root.selectedIndex = root.focusedIndex()
     root.opened = true
-    root.applyBlurState()
     root.currentPage = root.pageForIndex(root.selectedIndex)
     Qt.callLater(function() {
       root.clampSelection()
@@ -1554,7 +1520,6 @@ Item {
     root.settingsMode = false
     root.showKeybindHint = false
     root.altTabCancel()
-    root.applyBlurState()
   }
 
   function syncModalInputMode() {
@@ -1621,7 +1586,6 @@ Item {
     onTriggered: {
       if (root.altTabOpen) {
         root.altTabOverlayVisible = true
-        root.applyBlurState()
       }
     }
   }
@@ -1697,49 +1661,32 @@ Item {
   }
 
   Process {
-    id: blurApplyProcess
-    command: ["hyprctl", "eval", root.blurEvalCommand]
+    id: windowOpacityModeProbe
+    command: ["omarchy-hyprland-window-transparency"]
+    stdout: StdioCollector { id: windowOpacityModeOutput; waitForEnd: true }
     onExited: function(exitCode) {
-      if (exitCode !== 0)
-        console.warn("workspace overview: could not apply blur state", exitCode)
-      if (root.blurApplyPending) root.applyBlurState()
+      var mode = String(windowOpacityModeOutput.text || "").trim()
+      if (exitCode !== 0 || ["opaque", "transparent", "glassy"].indexOf(mode) < 0) {
+        console.warn("workspace overview: could not read Omarchy window opacity mode",
+          exitCode)
+        if (root.windowOpacityProbePending) root.refreshWindowOpacityMode()
+        return
+      }
+      root.windowOpacityModeKnown = true
+      root.glassyWindowMode = mode === "glassy"
+      root.applyWindowOpacityMode()
+      if (root.windowOpacityProbePending) root.refreshWindowOpacityMode()
     }
   }
 
   Process {
-    id: blurBaseProbe
-    command: ["sh", "-c",
-      "set -e; hyprctl -j getoption decoration:blur:enabled; "
-        + "hyprctl -j getoption decoration:blur:size; "
-        + "hyprctl -j getoption decoration:blur:passes"]
-    stdout: StdioCollector {
-      id: blurBaseProbeOutput
-      waitForEnd: true
-    }
+    id: glassyRuleApplyProcess
+    command: ["hyprctl", "eval", root.glassyRuleEvalCommand]
     onExited: function(exitCode) {
-      var options = String(blurBaseProbeOutput.text || "").trim().split(/\r?\n/)
-      try {
-        if (exitCode !== 0 || options.length !== 3)
-          throw new Error("incomplete Hyprland blur options")
-        var enabled = JSON.parse(options[0])
-        var size = JSON.parse(options[1])
-        var passes = JSON.parse(options[2])
-        if (typeof enabled.bool !== "boolean"
-            || !isFinite(Number(size.int)) || !isFinite(Number(passes.int)))
-          throw new Error("invalid Hyprland blur options")
-        root.blurBaseEnabled = enabled.bool
-        root.blurBaseSize = Number(size.int)
-        root.blurBasePasses = Number(passes.int)
-      } catch (e) {
-        // Do not overwrite compositor-wide blur settings if we failed to
-        // capture their original values.
-        console.warn("workspace overview: could not read existing blur options", e)
-        root.blurBaseStateKnown = false
-        root.blurApplyPending = false
-        return
-      }
-      root.blurBaseStateKnown = true
-      if (root.blurApplyPending) root.applyBlurState()
+      if (exitCode !== 0)
+        console.warn("workspace overview: could not apply Omarchy glassy layer rules",
+          exitCode)
+      if (root.glassyRuleApplyPending) root.applyWindowOpacityMode()
     }
   }
 
@@ -1886,6 +1833,7 @@ Item {
     }
     function onRawEvent(event) {
       var name = event && event.name ? String(event.name) : ""
+      if (name === "configreloaded") root.refreshWindowOpacityMode()
       if (name === "closewindow") root.forgetAltTabWindow(event)
       if (!root.opened && !root.altTabOpen) return
 
@@ -1924,10 +1872,6 @@ Item {
     function settings(): string { root.openSettings(); return "ok" }
     function setAltTabScope(scope: string): string {
       return root.setAltTabScope(scope)
-    }
-    function setBlurEnabled(value: string): string {
-      var enabled = value === "true" || value === "1" || value === "on"
-      return root.setBlurEnabled(enabled)
     }
     function altTabNext(): string { root.altTabStep(false); return "ok" }
     function altTabPrevious(): string { root.altTabStep(true); return "ok" }
@@ -2390,7 +2334,6 @@ Item {
             options: root.settingsOptions
             selectedIndex: root.settingsSelection
             altTabScope: root.altTabScope
-            blurEnabled: root.blurEnabled
             onToggleRequested: function(index) { root.toggleSettingsOption(index) }
             onDismissRequested: root.dismiss()
           }
@@ -2717,7 +2660,7 @@ Item {
     }
   }
 
-  // Keep the Alt+Tab blur surface bounded to the popup. The full-screen
+  // Keep the Alt+Tab surface bounded to the popup. The full-screen
   // PanelWindow above owns exclusive keyboard focus while this one only
   // receives pointer input.
   Variants {
@@ -2752,7 +2695,7 @@ Item {
           opened: root.altTabOverlayVisible
           availableWidth: panelScreen.width
           availableHeight: panelScreen.height
-          blurredBackground: root.altTabBlurRequested
+          glassyMode: root.glassyWindowMode
           scope: root.altTabScope
           candidates: root.altTabCandidates
           selectedIndex: root.altTabIndex

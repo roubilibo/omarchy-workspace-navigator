@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+"""Forward Omarchy commands and clean this plugin's Setup entry on removal."""
+
+import os
+import re
+import secrets
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+OMARCHY = Path("/usr/share/omarchy/bin/omarchy")
+PLUGIN_REMOVE = Path("/usr/share/omarchy/bin/omarchy-plugin-remove")
+PLUGIN_ID = "roubilibo.workspace-navigator"
+PLUGIN_DIR = Path.home() / ".config/omarchy/plugins" / PLUGIN_ID
+MENU_FILE = Path.home() / ".config/omarchy/extensions/omarchy-menu.jsonc"
+INSTALLED_WRAPPER = Path.home() / ".local/bin/omarchy"
+MAX_MENU_SIZE = 1024 * 1024
+
+MENU_ENTRY = re.compile(
+    r'^[ \t]*"setup\.workspace-navigator"[ \t]*:[ \t]*\{'
+    r'[^{}\r\n]*?"action"[ \t]*:[ \t]*'
+    r'"omarchy-shell roubilibo\.workspace-navigator settings"'
+    r'[^{}\r\n]*\}[ \t]*(?P<comma>,)?[ \t]*'
+    r'(?://[^\r\n]*)?(?:\r?\n|$)',
+    re.MULTILINE,
+)
+
+
+def jsonc_depth_at(text, offset):
+    depth = 0
+    index = 0
+    in_string = False
+    escaped = False
+    while index < offset:
+        char = text[index]
+        following = text[index + 1] if index + 1 < offset else ""
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char == "/" and following == "/":
+            newline = text.find("\n", index + 2, offset)
+            if newline < 0:
+                return depth
+            index = newline
+        elif char == "/" and following == "*":
+            end = text.find("*/", index + 2, offset)
+            if end < 0:
+                return depth
+            index = end + 1
+        elif char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+        index += 1
+    return depth
+
+
+def remove_previous_comma(text, entry_start):
+    prefix = text[:entry_start]
+    lines = prefix.splitlines(keepends=True)
+    for line_index in range(len(lines) - 1, -1, -1):
+        line = lines[line_index]
+        stripped = line.strip()
+        if not stripped or stripped.startswith("//") or stripped.startswith("/*"):
+            continue
+        if stripped == "{":
+            return text
+        comma = re.search(
+            r",(?=[ \t]*(?://[^\r\n]*|/\*.*?\*/)?[ \t]*(?:\r?\n)?$)",
+            line,
+        )
+        if comma is None:
+            raise ValueError("could not safely locate the menu entry separator")
+        absolute = sum(len(item) for item in lines[:line_index]) + comma.start()
+        return text[:absolute] + text[absolute + 1 :]
+    return text
+
+
+def atomic_replace(path, original_stat, content):
+    parent = path.parent
+    directory_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    temporary_name = ".workspace-navigator-menu-" + secrets.token_hex(12) + ".tmp"
+    fd = None
+    try:
+        fd = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            stat.S_IMODE(original_stat.st_mode),
+            dir_fd=directory_fd,
+        )
+        os.fchmod(fd, stat.S_IMODE(original_stat.st_mode))
+        view = memoryview(content)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("could not finish writing the menu file")
+            view = view[written:]
+        os.fsync(fd)
+        os.close(fd)
+        fd = None
+
+        latest = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+        if (latest.st_dev, latest.st_ino, latest.st_mtime_ns, latest.st_size) != (
+            original_stat.st_dev,
+            original_stat.st_ino,
+            original_stat.st_mtime_ns,
+            original_stat.st_size,
+        ):
+            raise OSError("menu file changed during cleanup; retry after saving edits")
+        if not stat.S_ISREG(latest.st_mode):
+            raise OSError("refusing to replace a non-regular menu path")
+
+        os.replace(
+            temporary_name,
+            path.name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        os.fsync(directory_fd)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        os.close(directory_fd)
+
+
+def remove_setup_entry():
+    try:
+        fd = os.open(
+            MENU_FILE,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+        )
+    except FileNotFoundError:
+        return True
+
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_MENU_SIZE:
+            raise OSError("refusing to edit a non-regular or oversized menu file")
+        chunks = []
+        remaining = MAX_MENU_SIZE + 1
+        while remaining:
+            chunk = os.read(fd, min(remaining, 8192))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > MAX_MENU_SIZE:
+            raise OSError("menu file exceeds the size limit")
+    finally:
+        os.close(fd)
+
+    text = data.decode("utf-8")
+    matches = [
+        match
+        for match in MENU_ENTRY.finditer(text)
+        if jsonc_depth_at(text, match.start()) == 1
+    ]
+    if not matches:
+        return True
+    if len(matches) != 1:
+        raise ValueError("found duplicate Workspace Navigator Setup entries; leaving menu unchanged")
+
+    match = matches[0]
+    updated = text[: match.start()] + text[match.end() :]
+    if not match.group("comma"):
+        updated = remove_previous_comma(updated, match.start())
+    if updated == text:
+        return True
+
+    current_path_stat = os.stat(MENU_FILE, follow_symlinks=False)
+    if (current_path_stat.st_dev, current_path_stat.st_ino) != (info.st_dev, info.st_ino):
+        raise OSError("menu file changed during cleanup; retry after saving edits")
+    atomic_replace(MENU_FILE, info, updated.encode("utf-8"))
+    print("Removed Workspace Navigator from Omarchy Menu → Setup.")
+    return True
+
+
+def remove_installed_wrapper():
+    if Path(os.path.abspath(__file__)) != INSTALLED_WRAPPER:
+        return
+    try:
+        INSTALLED_WRAPPER.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def main(argv):
+    if argv and argv[0] == "--remove-setup-entry":
+        try:
+            remove_setup_entry()
+            return 0
+        except (OSError, UnicodeError, ValueError) as error:
+            print(f"omarchy wrapper: {error}", file=sys.stderr)
+            return 1
+
+    if len(argv) >= 2 and argv[0] == "plugin" and argv[1] in ("remove", "rm"):
+        if any(argument in ("-h", "--help") for argument in argv[2:]):
+            os.execv(OMARCHY, [str(OMARCHY), *sys.argv[1:]])
+
+        was_installed = os.path.lexists(PLUGIN_DIR)
+        result = subprocess.run([str(PLUGIN_REMOVE), *argv[2:]], check=False)
+        if result.returncode != 0:
+            return result.returncode
+        if was_installed and not os.path.lexists(PLUGIN_DIR):
+            try:
+                remove_setup_entry()
+            except (OSError, UnicodeError, ValueError) as error:
+                print(
+                    "omarchy wrapper: plugin was removed, but its Setup entry "
+                    f"could not be cleaned: {error}",
+                    file=sys.stderr,
+                )
+                return 1
+            remove_installed_wrapper()
+        return result.returncode
+
+    os.execv(OMARCHY, [str(OMARCHY), *sys.argv[1:]])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -10,7 +10,6 @@ Rectangle {
   property var options: []
   property int selectedIndex: 0
   property string altTabScope: "workspace"
-  property bool blurEnabled: false
   signal toggleRequested(int index)
   signal dismissRequested()
 
@@ -60,8 +59,7 @@ Rectangle {
         label: modelData.label
         description: modelData.description
         hasCursor: root.selectedIndex === index
-        checked: modelData.kind === "altTab"
-          ? root.altTabScope === "all" : root.blurEnabled
+        checked: root.altTabScope === "all"
         onClicked: root.toggleRequested(index)
       }
     }

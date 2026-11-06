@@ -10,7 +10,7 @@ Rectangle {
   property string scope: "workspace"
   property real availableWidth: 1
   property real availableHeight: 1
-  property bool blurredBackground: false
+  property bool glassyMode: false
   property var candidates: []
   property int selectedIndex: -1
   property var workspaceLabelFor: null
@@ -61,7 +61,7 @@ Rectangle {
   height: Math.min(root.maxPopupHeight,
     root.visibleGridHeight + Style.space(84))
   radius: Style.cornerRadius
-  color: root.blurredBackground
+  color: root.glassyMode
     ? Util.alpha(Color.menu.background, 0.82) : Color.menu.background
   border.width: 1
   border.color: Util.alpha(Color.menu.border, 0.62)

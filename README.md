@@ -30,7 +30,9 @@ After the plugin is enabled, it registers `Workspace Navigator` in
 `Omarchy Menu → Setup`. Open it to choose:
 
 - `Alt+Tab: All Workspaces`: optional; when off, the default is Current Workspace.
-- `Background Blur`: blur the desktop behind the overview and Alt+Tab panel on demand.
+
+The overview follows `Appearance → Windows → Window Opacity`: backdrop blur is
+enabled only in Glassy mode, and disabled in Opaque or Transparent mode.
 
 The settings page is a centered floating card. It does not show the overview
 scrim behind it.
@@ -64,7 +66,13 @@ Alt to focus the highlighted window. Esc cancels the switcher.
 
 ```bash
 omarchy plugin add https://github.com/roubilibo/omarchy-workspace-navigator.git --enable --yes
+install -Dm755 ~/.config/omarchy/plugins/roubilibo.workspace-navigator/bin/omarchy ~/.local/bin/omarchy
 ```
+
+The second command installs a user-level dispatcher wrapper. It forwards all
+Omarchy commands unchanged, and removes this plugin's Setup menu entry after a
+successful uninstall. The wrapper removes itself after uninstalling this
+plugin, so the packaged Omarchy dispatcher is used normally afterward.
 
 When enabled, the plugin adds its managed loader block to
 `~/.config/hypr/bindings.lua` and reloads Hyprland if the file changes. It
