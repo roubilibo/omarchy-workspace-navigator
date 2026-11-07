@@ -144,6 +144,7 @@ Rectangle {
           id: titleText
           width: metadataTextColumn.width
           text: root.title
+          textFormat: Text.PlainText
           color: Color.menu.text
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
@@ -155,6 +156,7 @@ Rectangle {
           id: workspaceText
           width: metadataTextColumn.width
           text: root.workspaceLabel
+          textFormat: Text.PlainText
           color: Util.alpha(Color.menu.text, 0.62)
           font.family: Style.font.family
           font.pixelSize: Math.max(Style.space(8),

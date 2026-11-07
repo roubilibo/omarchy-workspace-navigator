@@ -16,6 +16,7 @@ Rectangle {
   property var draggedToplevel: null
   property int draggedSourceWorkspaceIdOverride: -1
   property bool freezeDraggedPreview: false
+  property bool centerDraggedPreview: false
   property Item homeParent: null
   property Item dragOverlay: null
   property real dragShrinkProgress: 0
@@ -56,6 +57,10 @@ Rectangle {
     ? root.dragLastTranslationX : 0
   readonly property real dragTranslationY: root.dragging
     ? root.dragLastTranslationY : 0
+  readonly property real visualGrabRatioX: root.centerDraggedPreview
+    ? 0.5 : root.dragGrabRatioX
+  readonly property real visualGrabRatioY: root.centerDraggedPreview
+    ? 0.5 : root.dragGrabRatioY
   readonly property bool selected: root.selectedToplevel !== null
     && root.isSameToplevel(root.selectedToplevel, root.toplevel)
   readonly property string appId: root.appIdFor(toplevel)
@@ -67,10 +72,23 @@ Rectangle {
   signal dragMoved(var toplevel, real x, real y,
     real grabRatioX, real grabRatioY)
   signal dragFinished(var toplevel)
+  signal dragDiagnostic(string eventName, var details)
   signal windowSelected(var toplevel)
   signal windowActivated(var toplevel)
   signal windowDroppedOn(var sourceToplevel, var targetToplevel,
-    real x, real y, real grabRatioX, real grabRatioY)
+    real x, real y, real grabRatioX, real grabRatioY,
+    real targetRatioX, real targetRatioY)
+
+  function reportDragDiagnostic(eventName, details) {
+    var workspaceId = root.toplevel && root.toplevel.workspace
+      ? Number(root.toplevel.workspace.id) : -1
+    var payload = Object.assign({
+      address: WindowModel.toplevelAddress(root.toplevel),
+      workspaceId: workspaceId,
+      previewSize: [root.width, root.height]
+    }, details || {})
+    root.dragDiagnostic(eventName, payload)
+  }
 
   function appIdFor(top) {
     if (!top) return ""
@@ -220,16 +238,49 @@ Rectangle {
     enabled: root.sameWorkspace
       && !root.isSameToplevel(root.draggedToplevel, root.toplevel)
 
+    onEntered: function(drag) {
+      root.reportDragDiagnostic("window-target-enter", {
+        targetAddress: WindowModel.toplevelAddress(root.toplevel),
+        sourceAddress: drag.source && drag.source.toplevel
+          ? WindowModel.toplevelAddress(drag.source.toplevel) : ""
+      })
+    }
+
+    onExited: root.reportDragDiagnostic("window-target-exit", {
+      targetAddress: WindowModel.toplevelAddress(root.toplevel)
+    })
+
+    onPositionChanged: function(drag) {
+      root.reportDragDiagnostic("window-target-position", {
+        targetAddress: WindowModel.toplevelAddress(root.toplevel),
+        localPosition: [drag.x, drag.y]
+      })
+    }
+
     onDropped: function(drop) {
       if (!drop.source || !drop.source.toplevel) {
+        root.reportDragDiagnostic("window-target-drop-rejected", {
+          hasSource: Boolean(drop.source),
+          hasToplevel: Boolean(drop.source && drop.source.toplevel)
+        })
         drop.accepted = false
         return
       }
       drop.acceptProposedAction()
       var point = root.mapToItem(root.parent, drop.x, drop.y)
+      root.reportDragDiagnostic("window-target-drop", {
+        targetAddress: WindowModel.toplevelAddress(root.toplevel),
+        mappedPosition: [point.x, point.y],
+        targetRatio: [
+          root.width > 0 ? Math.max(0, Math.min(1, drop.x / root.width)) : 0.5,
+          root.height > 0 ? Math.max(0, Math.min(1, drop.y / root.height)) : 0.5
+        ]
+      })
       root.windowDroppedOn(drop.source.toplevel, root.toplevel,
         point.x, point.y, drop.source.dragGrabRatioX,
-        drop.source.dragGrabRatioY)
+        drop.source.dragGrabRatioY,
+        root.width > 0 ? Math.max(0, Math.min(1, drop.x / root.width)) : 0.5,
+        root.height > 0 ? Math.max(0, Math.min(1, drop.y / root.height)) : 0.5)
     }
   }
 
@@ -354,10 +405,22 @@ Rectangle {
         root.dragGrabRatioY = Math.max(0, Math.min(1,
           previewDrag.centroid.pressPosition.y / Math.max(1, root.height)))
         dragProxy.dragSessionActive = true
+        root.reportDragDiagnostic("handler-active", {
+          active: true,
+          pointer: [previewDrag.centroid.position.x, previewDrag.centroid.position.y],
+          pressPosition: [previewDrag.centroid.pressPosition.x,
+            previewDrag.centroid.pressPosition.y],
+          startInOverlay: [root.dragStartX, root.dragStartY],
+          grabRatio: [root.dragGrabRatioX, root.dragGrabRatioY]
+        })
         root.dragStarted(root.toplevel,
           root.dragStartX + previewDrag.centroid.pressPosition.x,
           root.dragStartY + previewDrag.centroid.pressPosition.y)
       } else if (dragProxy.dragSessionActive) {
+        root.reportDragDiagnostic("proxy-drop", {
+          active: false,
+          pointer: [previewDrag.centroid.position.x, previewDrag.centroid.position.y]
+        })
         dragProxy.Drag.drop()
         dragProxy.dragSessionActive = false
         root.dragFinished(root.toplevel)
@@ -374,16 +437,27 @@ Rectangle {
         root.dragStartY + previewDrag.centroid.pressPosition.y
           + previewDrag.translation.y,
         root.dragGrabRatioX, root.dragGrabRatioY)
+      root.reportDragDiagnostic("handler-move", {
+        translation: [previewDrag.translation.x, previewDrag.translation.y],
+        pointerInHandler: [previewDrag.centroid.position.x,
+          previewDrag.centroid.position.y],
+        pointerInOverlay: [root.dragStartX
+          + previewDrag.centroid.pressPosition.x + previewDrag.translation.x,
+          root.dragStartY + previewDrag.centroid.pressPosition.y
+          + previewDrag.translation.y]
+      })
     }
   }
 
   Component.onDestruction: {
-    // Moving a tiled client updates Hyprland's model during the gesture. If
-    // that update destroys this delegate, DragHandler may never report its
-    // usual inactive transition, leaving the client in the private drag
-    // workspace. Finish through the same recovery path before this delegate
-    // goes away.
+    // Floating a tiled client can update Hyprland's model during the gesture.
+    // If that update destroys this delegate, DragHandler may never report its
+    // usual inactive transition. Finish through the same recovery path before
+    // this delegate goes away.
     if (dragProxy.dragSessionActive) {
+      root.reportDragDiagnostic("delegate-destroyed-during-drag", {
+        active: dragProxy.dragSessionActive
+      })
       dragProxy.dragSessionActive = false
       root.dragFinished(root.toplevel)
     }
@@ -416,21 +490,21 @@ Rectangle {
     id: dragVisual
     parent: root.dragOverlay
     readonly property real fittedTargetScale: Math.max(0.01, Math.min(1,
-      Math.min(root.dragTargetWidth / Math.max(1, root.dragStartWidth),
-        root.dragTargetHeight / Math.max(1, root.dragStartHeight))))
+      Math.min(root.dragTargetWidth / Math.max(1, root.width),
+        root.dragTargetHeight / Math.max(1, root.height))))
     // Interpolate uniformly to the largest size that fits the strip card, so
     // the window keeps its own aspect ratio and ends at thumbnail scale.
     readonly property real targetScale: 1
       - (1 - fittedTargetScale)
         * Math.max(0, Math.min(1, root.dragShrinkProgress))
-    width: root.dragging ? root.dragStartWidth * targetScale : root.width
-    height: root.dragging ? root.dragStartHeight * targetScale : root.height
+    width: root.dragging ? root.width * targetScale : root.width
+    height: root.dragging ? root.height * targetScale : root.height
     x: root.dragging
       ? root.dragStartX + root.dragTranslationX
-        + (root.dragStartWidth - width) * root.dragGrabRatioX : 0
+        + (root.dragStartWidth - width) * root.visualGrabRatioX : 0
     y: root.dragging
       ? root.dragStartY + root.dragTranslationY
-        + (root.dragStartHeight - height) * root.dragGrabRatioY : 0
+        + (root.dragStartHeight - height) * root.visualGrabRatioY : 0
     z: 1000000
     visible: root.dragging && root.dragOverlay !== null
     sourceItem: root
@@ -452,8 +526,8 @@ Rectangle {
     id: dragVisualBorder
     parent: root.dragOverlay
     readonly property real renderedScale: Math.max(0.01, Math.min(
-      width / Math.max(1, root.dragStartWidth),
-      height / Math.max(1, root.dragStartHeight)))
+      width / Math.max(1, root.width),
+      height / Math.max(1, root.height)))
     x: dragVisual.x
     y: dragVisual.y
     width: dragVisual.width

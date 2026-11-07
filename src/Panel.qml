@@ -36,6 +36,14 @@ Item {
   // Bumped after Hyprland events so the workspace/client summaries are
   // rebuilt while the panel is open.
   property int workspaceRevision: 0
+  // Set true temporarily while diagnosing overview drag/drop behavior.
+  property bool debugDrag:true
+  property var dragLogTimes: ({})
+  property string dragProbeAddress: ""
+  property int dragProbeWorkspaceId: -1
+  property int dragGeometryRevision: 0
+  property var lastDispatchedDragPosition: null
+  property var lastObservedDragPosition: null
   property var draggedToplevel: null
   property var dragGeometryOverrides: ({})
   property var dragWorkspaceToplevelSnapshots: null
@@ -90,12 +98,15 @@ Item {
     if (!root.opened) {
       root.closeWorkspaceContext()
       // A close key can dismiss the overview while a delegate is being
-      // replaced. Never leave a temporarily detached tiled client in the
-      // private drag workspace if the normal DragHandler finish was skipped.
-      if (root.dragStartState && root.dragStartState.temporarilyDetached
+      // replaced. Never leave a tiled client floating if the normal
+      // DragHandler finish was skipped while the overview was closing.
+      if (root.dragStartState && root.dragStartState.temporarilyFloated
           && !root.pendingWindowDrop)
         root.endWindowDrag(root.draggedToplevel)
     }
+  }
+  onDebugDragChanged: {
+    if (root.debugDrag && root.draggedToplevel) dragStateProbeTimer.start()
   }
 
   readonly property int minimumWorkspaceCount: 5
@@ -1013,6 +1024,7 @@ Item {
   function beginWindowDrag(toplevel, fromWorkspaceCanvas) {
     root.refreshAfterDrag = false
     root.dragGeometryOverrides = ({})
+    root.dragGeometryRevision += 1
     root.draggedFromWorkspaceCanvas = Boolean(fromWorkspaceCanvas)
     root.dragShrinkProgress = fromWorkspaceCanvas ? 0.28 : 0
     root.dragPreviewFrozen = false
@@ -1024,18 +1036,34 @@ Item {
       ? root.positiveWorkspaceId(toplevel.workspace.id) : -1
     var x = ipc && ipc.at ? Number(ipc.at[0]) : NaN
     var y = ipc && ipc.at ? Number(ipc.at[1]) : NaN
+    var width = ipc && ipc.size ? Number(ipc.size[0]) : NaN
+    var height = ipc && ipc.size ? Number(ipc.size[1]) : NaN
     root.dragStartState = address && workspaceId > 0
       ? ({ address: address, floating: Boolean(ipc && ipc.floating === true),
            x: x, y: y, hasPosition: isFinite(x) && isFinite(y),
-           workspaceId: workspaceId, temporarilyDetached: false,
-           dragWorkspaceName: "" }) : null
+           width: width, height: height,
+           hasSize: isFinite(width) && isFinite(height),
+           workspaceId: workspaceId, temporarilyFloated: false }) : null
+    root.dragProbeAddress = address
+    root.dragProbeWorkspaceId = workspaceId
+    root.lastDispatchedDragPosition = null
+    root.lastObservedDragPosition = null
+    // This probe keeps the preview geometry live while preserving the
+    // delegate snapshot that owns the active DragHandler.
+    dragStateProbeTimer.start()
+    root.logDrag("gesture-start", {
+      address: address, workspaceId: workspaceId,
+      floatingAtStart: Boolean(ipc && ipc.floating === true),
+      source: fromWorkspaceCanvas ? "canvas" : "strip",
+      startSize: isFinite(width) && isFinite(height) ? [width, height] : null,
+      startPosition: isFinite(x) && isFinite(y) ? [x, y] : null
+    })
 
-    // Remove the client from the source layout without toggling its floating
-    // state. The overview proxy follows the pointer while the remaining tiles
-    // reflow; the real client returns from its private workspace on drop.
+    // DragHandler reports active only after its pickup threshold is crossed.
+    // Defer one event-loop turn so it can finish establishing the drag proxy,
+    // then reflow the real source workspace just like Hyprland's mouse drag.
     if (root.dragStartState && !root.dragStartState.floating
         && Hyprland.usingLua) {
-      root.dragStartState.dragWorkspaceName = "workspace-navigator-drag"
       dragDetachTimer.restart()
     }
   }
@@ -1043,49 +1071,81 @@ Item {
   function detachDraggedTiledWindow() {
     var state = root.dragStartState
     if (!state || !root.draggedToplevel || state.floating
-        || state.temporarilyDetached)
+        || state.temporarilyFloated)
       return
+    state.temporarilyFloated = root.dispatchWindowFloat(state.address, true)
+    if (state.temporarilyFloated && state.hasSize) {
+      // Match Hyprland's native SUPER+drag pickup: it remembers a floating
+      // size at 84.89% of the tiled size before taking the window out of the
+      // layout. Without this, float() restores an old floating size, which
+      // can be much larger than the tile that was picked up.
+      var floatingSize = [
+        Math.max(20, Math.floor(state.width * 0.8489)),
+        Math.max(20, Math.floor(state.height * 0.8489))
+      ]
+      state.nativeFloatingSize = floatingSize
+      root.dispatchWindowResize(state.address, floatingSize)
 
-    // Let the drag proxy render at least one frame from the source client,
-    // then freeze that image before hiding the real client off-workspace.
-    root.dragPreviewFrozen = true
-    state.temporarilyDetached = root.dispatchWindowToDragWorkspace(
-      state.address, state.dragWorkspaceName)
-    if (state.temporarilyDetached)
-      dragGeometryProbeDelayTimer.restart()
-    else
-      root.dragPreviewFrozen = false
+      var ipc = root.draggedToplevel.lastIpcObject
+      var previewIpc = Object.assign({}, ipc || {})
+      previewIpc.size = floatingSize
+      previewIpc.floating = true
+      var overrides = Object.assign({}, root.dragGeometryOverrides)
+      overrides[state.address] = previewIpc
+      root.dragGeometryOverrides = overrides
+      root.dragGeometryRevision += 1
+    }
+    root.logDrag("temporary-float", {
+      address: state.address, requested: true,
+      dispatched: state.temporarilyFloated,
+      nativeFloatingSize: state.nativeFloatingSize || null
+    })
   }
 
-  function updateDragGeometryOverrides(exitCode, output) {
-    if (exitCode !== 0 || !root.draggedToplevel || !root.dragStartState
-        || !root.dragStartState.temporarilyDetached)
-      return
-
-    var clients = null
-    try { clients = JSON.parse(String(output || "")) } catch (e) { return }
-    if (!Array.isArray(clients)) return
-
-    var overrides = {}
-    for (var i = 0; i < clients.length; i++) {
-      var client = clients[i]
-      var address = root.normalizedAddress(client)
-      var at = client && client.at
-      var size = client && client.size
-      if (!address || !at || at.length < 2 || !size || size.length < 2) continue
-      // Keep the dragged client's preview backed by its source-workspace
-      // snapshot. Its live compositor location is the internal drag workspace.
-      if (address === root.dragStartState.address) continue
-      var x = Number(at[0]), y = Number(at[1])
-      var width = Number(size[0]), height = Number(size[1])
-      if (!isFinite(x) || !isFinite(y) || !isFinite(width) || !isFinite(height)
-          || width <= 0 || height <= 0)
-        continue
-      overrides[address] = {
-        at: [x, y], size: [width, height], floating: client.floating === true
-      }
+  function dispatchWindowResize(address, size) {
+    if (!address || !size || size.length < 2
+        || !isFinite(Number(size[0])) || !isFinite(Number(size[1]))
+        || Number(size[0]) < 1 || Number(size[1]) < 1
+        || !Hyprland.usingLua)
+      return false
+    try {
+      root.logDrag("dispatch-native-drag-size", {
+        targetAddress: address, size: [Number(size[0]), Number(size[1])]
+      })
+      Hyprland.dispatch("hl.dsp.window.resize({ x = " + String(size[0])
+        + ", y = " + String(size[1])
+        + ", relative = false, window = \"address:" + address + "\" })")
+      return true
+    } catch (e) {
+      console.warn("workspace overview: could not apply native drag size",
+        address, size, e)
+      return false
     }
-    root.dragGeometryOverrides = overrides
+  }
+
+  function logDrag(eventName, details, throttleMs) {
+    if (!root.debugDrag) return
+    var now = Date.now()
+    var interval = Math.max(0, Number(throttleMs) || 0)
+    var key = String(eventName || "unknown")
+    if (interval > 0 && now - Number(root.dragLogTimes[key] || 0) < interval)
+      return
+    if (interval > 0) {
+      var times = Object.assign({}, root.dragLogTimes)
+      times[key] = now
+      root.dragLogTimes = times
+    }
+    var state = root.dragStartState
+    var entry = {
+      time: now,
+      event: String(eventName || "unknown"),
+      address: state ? state.address : "",
+      sourceWorkspaceId: state ? state.workspaceId : -1,
+      floatingAtStart: state ? state.floating : null,
+      temporarilyFloated: state ? state.temporarilyFloated : false
+    }
+    if (details && typeof details === "object") Object.assign(entry, details)
+    console.log("[workspace-navigator][drag] " + JSON.stringify(entry))
   }
 
   function updateDragShrinkProgress(pointerX, pointerY) {
@@ -1116,6 +1176,7 @@ Item {
   function endWindowDrag(toplevel) {
     dragDetachTimer.stop()
     floatingDragMoveTimer.stop()
+    dragStateProbeTimer.stop()
     root.pendingFloatingDragMove = null
     root.dragShrinkProgress = 0
     root.draggedFromWorkspaceCanvas = false
@@ -1123,15 +1184,19 @@ Item {
     var droppedWorkspaceId = root.pendingWindowDrop
       && root.pendingWindowDrop.address === root.normalizedAddress(toplevel)
       ? root.pendingWindowDrop.workspaceId : -1
+    root.logDrag("gesture-finish", {
+      address: root.normalizedAddress(toplevel),
+      droppedWorkspaceId: droppedWorkspaceId,
+      dropPending: Boolean(root.pendingWindowDrop)
+    })
     if (root.draggedToplevel === toplevel && root.dragStartState) {
       var dropPending = root.pendingWindowDrop
         && root.pendingWindowDrop.address === root.dragStartState.address
-      if (root.dragStartState.temporarilyDetached) {
-        // DropArea and DragHandler can finish in either order. Return to the
-        // source workspace only when no drop transaction owns the destination.
+      if (root.dragStartState.temporarilyFloated) {
+        // DropArea and DragHandler can finish in either order. Retile only
+        // when no drop transaction owns the destination.
         if (!dropPending)
-          root.dispatchWorkspaceMove(root.dragStartState.address,
-            root.dragStartState.workspaceId)
+          root.dispatchWindowFloat(root.dragStartState.address, false)
       } else if (!dropPending && root.dragStartState.floating
           && root.dragStartState.hasPosition) {
         root.dispatchWindowPosition(root.dragStartState.address,
@@ -1168,16 +1233,24 @@ Item {
     return Boolean(ipc && ipc.floating === true)
   }
 
-  function dispatchWindowToDragWorkspace(address, workspaceName) {
-    if (!address || !workspaceName || !Hyprland.usingLua) return false
+  function dispatchWindowFloat(address, floating) {
+    if (!address) return false
     try {
-      Hyprland.dispatch('hl.dsp.window.move({ workspace = "special:'
-        + workspaceName + '", window = "address:' + address
-        + '", follow = false })')
+      root.logDrag("dispatch-float", {
+        targetAddress: address, floating: Boolean(floating),
+        backend: Hyprland.usingLua ? "lua" : "legacy"
+      })
+      if (Hyprland.usingLua) {
+        Hyprland.dispatch('hl.dsp.window.float({ action = "'
+          + (floating ? "on" : "off") + '", window = "address:'
+          + address + '" })')
+      } else {
+        Hyprland.dispatch("togglefloating,address:" + address)
+      }
       return true
     } catch (e) {
-      console.warn("workspace overview: could not detach tiled window from layout",
-        address, workspaceName, e)
+      console.warn("workspace overview: could not change window floating state",
+        address, floating, e)
       return false
     }
   }
@@ -1189,6 +1262,9 @@ Item {
   }
 
   function dispatchWorkspaceMove(address, workspaceId) {
+    root.logDrag("dispatch-workspace", {
+      targetAddress: address, targetWorkspaceId: Number(workspaceId)
+    })
     if (Hyprland.usingLua) {
       Hyprland.dispatch("hl.dsp.window.move({ workspace = \""
         + String(workspaceId) + "\", window = \"address:" + address
@@ -1199,13 +1275,13 @@ Item {
     }
   }
 
-  function swapTiledWindows(sourceToplevel, targetToplevel) {
+  function swapTiledWindows(sourceToplevel, targetToplevel, dropIntent) {
     var sourceAddress = root.normalizedAddress(sourceToplevel)
     var targetAddress = root.normalizedAddress(targetToplevel)
-    // A tiled overview drag temporarily moves the live client to a private
-    // workspace so Hyprland can reflow the remaining layout. Use its recorded
-    // source workspace while validating the drop; the model currently reports
-    // the private workspace until the return dispatch is processed.
+    root.logDrag("tiled-swap-request", {
+      sourceAddress: sourceAddress, targetAddress: targetAddress
+    })
+    // The source remains on its original workspace while temporarily floating.
     var sourceWorkspaceId = root.dragStartState
       && sourceAddress === root.dragStartState.address
       ? root.dragStartState.workspaceId
@@ -1218,13 +1294,16 @@ Item {
         || sourceWorkspaceId !== targetWorkspaceId
         || root.wasFloatingAtDragStart(sourceToplevel)
         || root.isFloatingWindow(targetToplevel)
-        || cursorProbe.running || root.pendingTiledSwap)
+        || cursorProbe.running || tiledSwapStateProbe.running
+        || tiledSwapStateProbeTimer.running || root.pendingTiledSwap)
       return false
 
     root.pendingTiledSwap = {
       sourceAddress: sourceAddress,
       targetAddress: targetAddress,
-      workspaceId: sourceWorkspaceId
+      workspaceId: sourceWorkspaceId,
+      dropIntent: dropIntent || null,
+      attempts: 0
     }
     cursorProbe.running = true
     return true
@@ -1232,17 +1311,18 @@ Item {
 
   function finishTiledWindowSwap(exitCode, cursorPosition) {
     var swap = root.pendingTiledSwap
-    root.pendingTiledSwap = null
-    if (exitCode !== 0 || !swap) return
-
-    // A tiled source may have been temporarily floated during the overview
-    // drag. Refresh after it is restored so validation sees the current
-    // floating state rather than the model snapshot from drag start.
-    try { Hyprland.refreshToplevels() } catch (e) {}
+    if (!swap) return
+    if (exitCode !== 0) {
+      root.pendingTiledSwap = null
+      console.warn("workspace overview: could not read cursor after tiled drop",
+        exitCode)
+      return
+    }
 
     var match = String(cursorPosition || "").match(
       /^\s*(-?\d+)\s*,\s*(-?\d+)\s*$/)
     if (!match) {
+      root.pendingTiledSwap = null
       console.warn("workspace overview: could not parse cursor position",
         cursorPosition)
       return
@@ -1252,38 +1332,192 @@ Item {
     if (!isFinite(x) || !isFinite(y) || Math.floor(x) !== x
         || Math.floor(y) !== y || Math.abs(x) > root.maximumWorkspaceId
         || Math.abs(y) > root.maximumWorkspaceId) {
+      root.pendingTiledSwap = null
       console.warn("workspace overview: refusing invalid cursor position",
         cursorPosition)
       return
     }
 
-    var source = root.findToplevelByAddress(swap.sourceAddress)
-    var target = root.findToplevelByAddress(swap.targetAddress)
-    if (!source || !target || root.isFloatingWindow(source)
-        || root.isFloatingWindow(target)
-        || !source.workspace || !target.workspace
-        || root.positiveWorkspaceId(source.workspace.id) !== swap.workspaceId
-        || root.positiveWorkspaceId(target.workspace.id) !== swap.workspaceId) {
-      console.warn("workspace overview: tiled swap targets changed before drop")
+    // The QML toplevel model can lag behind the float-off dispatcher. Check
+    // Hyprland's current client list and retry until both windows are tiled
+    // again instead of rejecting a valid drop against stale lastIpcObject data.
+    swap.cursorX = x
+    swap.cursorY = y
+    root.pendingTiledSwap = swap
+    root.probeTiledWindowSwapState()
+  }
+
+  function probeTiledWindowSwapState() {
+    if (!root.pendingTiledSwap || tiledSwapStateProbe.running) return
+    tiledSwapStateProbe.running = true
+  }
+
+  function tiledDropPlacement(source, target, dropIntent) {
+    if (!dropIntent || !source || !target
+        || !Array.isArray(source.at) || source.at.length < 2
+        || !Array.isArray(source.size) || source.size.length < 2
+        || !Array.isArray(target.at) || target.at.length < 2
+        || !Array.isArray(target.size) || target.size.length < 2)
+      return null
+
+    var sx = Number(source.at[0]), sy = Number(source.at[1])
+    var sw = Number(source.size[0]), sh = Number(source.size[1])
+    var tx = Number(target.at[0]), ty = Number(target.at[1])
+    var tw = Number(target.size[0]), th = Number(target.size[1])
+    if (![sx, sy, sw, sh, tx, ty, tw, th].every(isFinite)
+        || sw <= 0 || sh <= 0 || tw <= 0 || th <= 0)
+      return null
+
+    // Determine which dimension Hyprland used for this split from the
+    // windows' actual post-retile rectangles. This keeps the placement check
+    // independent of Dwindle's current split direction.
+    var overlapX = Math.max(0, Math.min(sx + sw, tx + tw) - Math.max(sx, tx))
+    var overlapY = Math.max(0, Math.min(sy + sh, ty + th) - Math.max(sy, ty))
+    var overlapRatioX = overlapX / Math.min(sw, tw)
+    var overlapRatioY = overlapY / Math.min(sh, th)
+    var axis = overlapRatioY > overlapRatioX ? "x" : "y"
+    var siblingOverlap = axis === "x" ? overlapRatioY : overlapRatioX
+    var splitOverlap = axis === "x" ? overlapRatioX : overlapRatioY
+    // A floating-sized source can briefly overlap the expanded target tile
+    // before Dwindle publishes the settled tiled rectangles. Do not mistake
+    // that transient geometry for the result of a real split.
+    if (siblingOverlap < 0.75 || splitOverlap > 0.25) return null
+
+    var sourceCenter = axis === "x" ? sx + sw / 2 : sy + sh / 2
+    var targetCenter = axis === "x" ? tx + tw / 2 : ty + th / 2
+    var separation = sourceCenter - targetCenter
+    if (Math.abs(separation) < 1) return null
+
+    var ratio = Number(axis === "x" ? dropIntent.x : dropIntent.y)
+    if (!isFinite(ratio)) return null
+    var sourceSide = separation > 0 ? "second" : "first"
+    var requestedSide = ratio >= 0.5 ? "second" : "first"
+    return {
+      axis: axis,
+      ratio: ratio,
+      sourceSide: sourceSide,
+      requestedSide: requestedSide,
+      alreadyAtRequestedSide: sourceSide === requestedSide,
+      sourceRect: [sx, sy, sw, sh],
+      targetRect: [tx, ty, tw, th]
+    }
+  }
+
+  function finishTiledWindowSwapState(exitCode, output) {
+    var swap = root.pendingTiledSwap
+    if (!swap) return
+
+    var clients = null
+    if (exitCode === 0) {
+      try { clients = JSON.parse(String(output || "")) } catch (e) {}
+    }
+    var source = null
+    var target = null
+    if (Array.isArray(clients)) {
+      for (var i = 0; i < clients.length; i++) {
+        var client = clients[i]
+        var address = root.normalizedAddress(client)
+        if (address === swap.sourceAddress) source = client
+        if (address === swap.targetAddress) target = client
+      }
+    }
+
+    var sourceWorkspaceId = source && source.workspace
+      && source.workspace.id !== undefined
+      ? root.positiveWorkspaceId(source.workspace.id) : -1
+    var targetWorkspaceId = target && target.workspace
+      && target.workspace.id !== undefined
+      ? root.positiveWorkspaceId(target.workspace.id) : -1
+    var sourceFloating = Boolean(source && source.floating === true)
+    var targetFloating = Boolean(target && target.floating === true)
+    var ready = Boolean(source && target && !sourceFloating && !targetFloating
+      && sourceWorkspaceId === swap.workspaceId
+      && targetWorkspaceId === swap.workspaceId)
+
+    if (!ready) {
+      swap.attempts = Number(swap.attempts || 0) + 1
+      var reason = !Array.isArray(clients) ? "invalid-client-list"
+        : !source ? "source-missing" : !target ? "target-missing"
+        : sourceFloating ? "source-still-floating"
+        : targetFloating ? "target-floating"
+        : sourceWorkspaceId !== swap.workspaceId ? "source-workspace-changed"
+        : "target-workspace-changed"
+      root.logDrag("tiled-swap-state-pending", {
+        sourceAddress: swap.sourceAddress,
+        targetAddress: swap.targetAddress,
+        attempt: swap.attempts, maxAttempts: 12, reason: reason,
+        sourceFloating: source ? sourceFloating : null,
+        sourceWorkspaceId: sourceWorkspaceId,
+        targetFloating: target ? targetFloating : null,
+        targetWorkspaceId: targetWorkspaceId
+      })
+      if (swap.attempts >= 12) {
+        root.pendingTiledSwap = null
+        root.logDrag("tiled-swap-state-timeout", {
+          sourceAddress: swap.sourceAddress,
+          targetAddress: swap.targetAddress,
+          reason: reason,
+          sourceFloating: source ? sourceFloating : null,
+          sourceWorkspaceId: sourceWorkspaceId,
+          targetFloating: target ? targetFloating : null,
+          targetWorkspaceId: targetWorkspaceId
+        })
+        console.warn("workspace overview: tiled swap state did not settle",
+          swap.sourceAddress, swap.targetAddress, reason)
+        return
+      }
+      root.pendingTiledSwap = swap
+      tiledSwapStateProbeTimer.restart()
       return
     }
 
-    try {
-      // Use the window-scoped dispatcher so Hyprland receives both the
-      // dragged source and the tile under the drop. The global swap dispatcher
-      // acts on the active window, which the overview does not change.
-      Hyprland.dispatch("hl.dsp.window.swap({ window = \"address:"
-        + swap.sourceAddress + "\", target = \"address:"
-        + swap.targetAddress + "\" })")
-    } catch (e) {
-      console.warn("workspace overview: could not swap tiled windows",
-        swap.sourceAddress, swap.targetAddress, e)
-      return
+    root.pendingTiledSwap = null
+    root.logDrag("tiled-swap-state-ready", {
+      sourceAddress: swap.sourceAddress,
+      targetAddress: swap.targetAddress,
+      attempt: Number(swap.attempts || 0) + 1,
+      sourceFloating: sourceFloating,
+      sourceWorkspaceId: sourceWorkspaceId,
+      targetFloating: targetFloating,
+      targetWorkspaceId: targetWorkspaceId
+    })
+
+    var placement = root.tiledDropPlacement(source, target, swap.dropIntent)
+    if (placement && placement.alreadyAtRequestedSide) {
+      root.logDrag("tiled-swap-skipped-drop-slot-already-matches", {
+        sourceAddress: swap.sourceAddress,
+        targetAddress: swap.targetAddress,
+        axis: placement.axis,
+        ratio: placement.ratio,
+        sourceSide: placement.sourceSide,
+        requestedSide: placement.requestedSide,
+        sourceRect: placement.sourceRect,
+        targetRect: placement.targetRect
+      })
+    } else {
+      try {
+        // Use the window-scoped dispatcher so Hyprland receives both the
+        // dragged source and the tile under the drop. The global swap dispatcher
+        // acts on the active window, which the overview does not change.
+        Hyprland.dispatch("hl.dsp.window.swap({ window = \"address:"
+          + swap.sourceAddress + "\", target = \"address:"
+          + swap.targetAddress + "\" })")
+        root.logDrag("tiled-swap-dispatched", {
+          sourceAddress: swap.sourceAddress, targetAddress: swap.targetAddress,
+          sourceWorkspaceId: sourceWorkspaceId,
+          targetWorkspaceId: targetWorkspaceId,
+          placement: placement || null
+        })
+      } catch (e) {
+        console.warn("workspace overview: could not swap tiled windows",
+          swap.sourceAddress, swap.targetAddress, e)
+        return
+      }
     }
 
     try {
-      Hyprland.dispatch("hl.dsp.cursor.move({ x = " + String(x)
-        + ", y = " + String(y) + " })")
+      Hyprland.dispatch("hl.dsp.cursor.move({ x = " + String(swap.cursorX)
+        + ", y = " + String(swap.cursorY) + " })")
     } catch (e) {
       console.warn("workspace overview: could not restore cursor after tiled swap", e)
     }
@@ -1293,7 +1527,8 @@ Item {
   }
 
   function floatingWindowPosition(toplevel, workspaceId, areaX, areaY,
-                                   areaWidth, areaHeight, grabRatioX, grabRatioY) {
+                                   areaWidth, areaHeight, grabRatioX, grabRatioY,
+                                   allowPartial) {
     var address = root.normalizedAddress(toplevel)
     var id = root.positiveWorkspaceId(workspaceId)
     var ipc = toplevel && toplevel.lastIpcObject
@@ -1308,17 +1543,24 @@ Item {
         break
       }
     }
-    var size = ipc && ipc.size ? ipc.size : null
+    var geometryOverride = address ? root.dragGeometryOverrides[address] : null
+    var size = geometryOverride && geometryOverride.size
+      ? geometryOverride.size : (ipc && ipc.size ? ipc.size : null)
     if (!address || id < 1 || !monitor || !size || size.length < 2) return null
 
     var position = WindowGeometry.workspacePosition(monitor, screen,
       areaWidth, areaHeight, areaX, areaY, grabRatioX, grabRatioY,
-      size[0], size[1])
+      size[0], size[1], Boolean(allowPartial))
     return position ? ({ address: address, workspaceId: id, position: position }) : null
   }
 
   function dispatchWindowPosition(address, position) {
     if (!address || !position) return
+    if (root.dragProbeAddress === address)
+      root.lastDispatchedDragPosition = [Number(position.x), Number(position.y)]
+    root.logDrag("dispatch-position", {
+      targetAddress: address, position: [position.x, position.y]
+    }, 100)
     if (Hyprland.usingLua) {
       Hyprland.dispatch("hl.dsp.window.move({ x = " + String(position.x)
         + ", y = " + String(position.y)
@@ -1331,28 +1573,45 @@ Item {
 
   function queueFloatingWindowDragMove(toplevel, workspaceId, areaX, areaY,
                                        areaWidth, areaHeight, grabRatioX, grabRatioY) {
+    var state = root.dragStartState
+    var nativeTiledDrag = state
+      && state.address === root.normalizedAddress(toplevel)
+      && state.temporarilyFloated
+    var moveGrabRatioX = nativeTiledDrag ? 0.5 : grabRatioX
+    var moveGrabRatioY = nativeTiledDrag ? 0.5 : grabRatioY
     if (root.draggedToplevel !== toplevel
-        || !root.wasFloatingAtDragStart(toplevel)
+        || (!root.wasFloatingAtDragStart(toplevel) && !nativeTiledDrag)
         || !root.dragStartState || !root.dragStartState.hasPosition)
       return
+    root.logDrag("mapped-pointer", {
+      workspaceId: Number(workspaceId), previewPosition: [areaX, areaY],
+      grabRatio: [grabRatioX, grabRatioY],
+      compositorGrabRatio: [moveGrabRatioX, moveGrabRatioY],
+      areaSize: [areaWidth, areaHeight]
+    }, 100)
     root.pendingFloatingDragMove = {
       toplevel: toplevel, workspaceId: workspaceId, x: areaX, y: areaY,
       width: areaWidth, height: areaHeight,
-      grabRatioX: grabRatioX, grabRatioY: grabRatioY
+      grabRatioX: moveGrabRatioX, grabRatioY: moveGrabRatioY
     }
     // The compositor's IPC model is intentionally held stable during a drag
-    // so the active DragHandler survives. Feed the same transient position to
-    // every workspace preview so the strip mirrors the large canvas live.
+    // so the active DragHandler survives. Feed transient geometry to both
+    // previews through the independent override map.
     if (root.draggedFromWorkspaceCanvas) {
       var position = root.floatingWindowPosition(toplevel, workspaceId,
-        areaX, areaY, areaWidth, areaHeight, grabRatioX, grabRatioY)
+        areaX, areaY, areaWidth, areaHeight,
+        moveGrabRatioX, moveGrabRatioY, true)
       var ipc = toplevel.lastIpcObject
       if (position && ipc) {
         var previewIpc = Object.assign({}, ipc)
         previewIpc.at = [position.position.x, position.position.y]
+        var current = root.dragGeometryOverrides[position.address]
+        if (current && current.size) previewIpc.size = current.size
+        previewIpc.floating = true
         var overrides = Object.assign({}, root.dragGeometryOverrides)
         overrides[position.address] = previewIpc
         root.dragGeometryOverrides = overrides
+        root.dragGeometryRevision += 1
       }
     }
     if (!floatingDragMoveTimer.running) floatingDragMoveTimer.start()
@@ -1364,8 +1623,97 @@ Item {
     if (!pending || root.draggedToplevel !== pending.toplevel) return
     var move = root.floatingWindowPosition(pending.toplevel, pending.workspaceId,
       pending.x, pending.y, pending.width, pending.height,
-      pending.grabRatioX, pending.grabRatioY)
+      pending.grabRatioX, pending.grabRatioY, true)
     if (move) root.dispatchWindowPosition(move.address, move.position)
+  }
+
+  function recordActualDragPosition(exitCode, output) {
+    var address = root.dragProbeAddress
+    if (!address) return
+    if (exitCode !== 0) {
+      root.logDrag("actual-position-probe-failed", {
+        targetAddress: address, exitCode: exitCode
+      }, 500)
+      return
+    }
+
+    var clients = null
+    try { clients = JSON.parse(String(output || "")) } catch (e) {
+      root.logDrag("actual-position-probe-invalid-json", {
+        targetAddress: address
+      }, 500)
+      return
+    }
+    if (!Array.isArray(clients)) return
+
+    var client = null
+    var geometryOverrides = {}
+    var workspaceGeometry = []
+    for (var i = 0; i < clients.length; i++) {
+      var candidate = clients[i]
+      var candidateAddress = root.normalizedAddress(candidate)
+      var candidateWorkspaceId = candidate && candidate.workspace
+        && candidate.workspace.id !== undefined
+        ? Number(candidate.workspace.id) : -1
+      if (candidateAddress === address) client = candidate
+      if (candidateWorkspaceId !== root.dragProbeWorkspaceId
+          || !candidateAddress
+          || !candidate.at || candidate.at.length < 2
+          || !candidate.size || candidate.size.length < 2)
+        continue
+      var geometry = {
+        address: candidateAddress,
+        at: [Number(candidate.at[0]), Number(candidate.at[1])],
+        size: [Number(candidate.size[0]), Number(candidate.size[1])],
+        floating: candidate.floating === true
+      }
+      workspaceGeometry.push(geometry)
+      geometryOverrides[candidateAddress] = {
+        at: geometry.at, size: geometry.size,
+        floating: geometry.floating
+      }
+    }
+    root.logDrag("workspace-geometry-snapshot", {
+      clients: workspaceGeometry
+    }, 250)
+    root.dragGeometryOverrides = geometryOverrides
+    root.dragGeometryRevision += 1
+    if (!client || !client.at || client.at.length < 2) {
+      root.logDrag("actual-position-not-found", {
+        targetAddress: address
+      }, 500)
+      return
+    }
+
+    var actual = [Number(client.at[0]), Number(client.at[1])]
+    var actualSize = client.size && client.size.length >= 2
+      ? [Number(client.size[0]), Number(client.size[1])] : null
+    var requested = root.lastDispatchedDragPosition
+    var previous = root.lastObservedDragPosition
+    var workspaceId = client.workspace && client.workspace.id !== undefined
+      ? Number(client.workspace.id) : -1
+    root.lastObservedDragPosition = actual
+    root.logDrag("actual-compositor-position", {
+      address: address,
+      actualPosition: actual,
+      actualSize: actualSize,
+      startSize: root.dragStartState
+        && root.dragStartState.address === address
+        && root.dragStartState.hasSize
+        ? [root.dragStartState.width, root.dragStartState.height] : null,
+      sizeDeltaFromStart: actualSize && root.dragStartState
+        && root.dragStartState.address === address
+        && root.dragStartState.hasSize
+        ? [actualSize[0] - root.dragStartState.width,
+          actualSize[1] - root.dragStartState.height] : null,
+      requestedPosition: requested,
+      actualDeltaFromRequest: requested
+        ? [actual[0] - requested[0], actual[1] - requested[1]] : null,
+      actualDeltaSincePreviousSample: previous
+        ? [actual[0] - previous[0], actual[1] - previous[1]] : null,
+      floating: client.floating === true,
+      actualWorkspaceId: workspaceId
+    }, 80)
   }
 
   function refreshAfterWindowAction(toplevel) {
@@ -1406,6 +1754,11 @@ Item {
     try {
       if (state.workspaceId > 0)
         root.dispatchWorkspaceMove(state.address, state.workspaceId)
+      // A drag started tiled may have been floated for reflow before the drop
+      // transaction failed. Explicit Lua actions make this rollback repeatable.
+      if (root.dragStartState && root.dragStartState.address === state.address
+          && root.dragStartState.temporarilyFloated)
+        root.dispatchWindowFloat(state.address, state.floating)
       if (state.floating && state.hasPosition)
         root.dispatchWindowPosition(state.address, { x: state.x, y: state.y })
       return true
@@ -1460,29 +1813,45 @@ Item {
 
   function dropWindowOnWorkspace(toplevel, workspaceId, x, y,
                                  grabRatioX, grabRatioY, areaWidth, areaHeight,
-                                 targetToplevel) {
+                                 targetToplevel, targetRatioX, targetRatioY) {
     var state = root.draggedToplevel === toplevel ? root.dragStartState : null
     var id = root.positiveWorkspaceId(workspaceId)
     if (!state || state.workspaceId < 1 || id < 1 || root.pendingWindowDrop)
       return false
+    root.logDrag("drop-workspace", {
+      targetWorkspaceId: id, targetAddress: targetToplevel
+        ? root.normalizedAddress(targetToplevel) : "",
+      position: [x, y], targetKind: targetToplevel ? "window" : "workspace",
+      targetRatio: targetToplevel
+        ? [Number(targetRatioX), Number(targetRatioY)] : null
+    })
     dragDetachTimer.stop()
     if (state.floating && !state.hasPosition) return false
 
-    // Same-workspace tiled drops target a concrete tile, so return the source
-    // from its private drag workspace before exchanging layout slots.
+    // Same-workspace tiled drops target a concrete tile, so retile the source
+    // before exchanging layout slots.
     if (!state.floating && state.workspaceId === id) {
+      var wasTemporarilyFloated = state.temporarilyFloated
+      if (state.temporarilyFloated) {
+        root.dispatchWindowFloat(state.address, false)
+        state.temporarilyFloated = false
+      }
       if (targetToplevel && !root.isFloatingWindow(targetToplevel)) {
-        if (state.temporarilyDetached)
-          root.dispatchWorkspaceMove(state.address, state.workspaceId)
-        root.swapTiledWindows(toplevel, targetToplevel)
+        var dropIntent = wasTemporarilyFloated
+          && isFinite(Number(targetRatioX)) && isFinite(Number(targetRatioY))
+          ? ({ x: Math.max(0, Math.min(1, Number(targetRatioX))),
+               y: Math.max(0, Math.min(1, Number(targetRatioY))) }) : null
+        root.swapTiledWindows(toplevel, targetToplevel, dropIntent)
       }
       return true
     }
 
     var position = null
-    if (state.floating) {
+    if (state.floating || state.temporarilyFloated) {
+      var moveGrabRatioX = state.temporarilyFloated ? 0.5 : grabRatioX
+      var moveGrabRatioY = state.temporarilyFloated ? 0.5 : grabRatioY
       var move = root.floatingWindowPosition(toplevel, id, x, y,
-        areaWidth, areaHeight, grabRatioX, grabRatioY)
+        areaWidth, areaHeight, moveGrabRatioX, moveGrabRatioY)
       if (!move) return false
       position = move.position
     }
@@ -1494,9 +1863,13 @@ Item {
     }
     root.pendingWindowDrop = transaction
     try {
-      if (state.temporarilyDetached || state.workspaceId !== id)
+      if (state.workspaceId !== id)
         root.dispatchWorkspaceMove(state.address, id)
       if (position) root.dispatchWindowPosition(state.address, position)
+      if (!state.floating && state.temporarilyFloated) {
+        root.dispatchWindowFloat(state.address, false)
+        state.temporarilyFloated = false
+      }
       root.refreshAfterWindowAction(toplevel)
       windowDropVerifyTimer.start()
       return true
@@ -1748,22 +2121,25 @@ Item {
   }
 
   Timer {
-    id: dragDetachTimer
-    interval: 90
-    repeat: false
-    onTriggered: root.detachDraggedTiledWindow()
+    id: dragStateProbeTimer
+    interval: 100
+    repeat: true
+    onTriggered: {
+      if (!root.draggedToplevel) {
+        stop()
+        return
+      }
+      if (!dragStateProbe.running) dragStateProbe.running = true
+    }
   }
 
   Timer {
-    id: dragGeometryProbeDelayTimer
-    interval: 60
+    id: dragDetachTimer
+    // DragHandler becomes active after the pickup threshold has already been
+    // crossed. Let the event finish, then mirror Hyprland's immediate float.
+    interval: 0
     repeat: false
-    onTriggered: {
-      if (root.draggedToplevel && root.dragStartState
-          && root.dragStartState.temporarilyDetached
-          && !dragGeometryProbe.running)
-        dragGeometryProbe.running = true
-    }
+    onTriggered: root.detachDraggedTiledWindow()
   }
 
   Timer {
@@ -1771,6 +2147,13 @@ Item {
     interval: 120
     repeat: false
     onTriggered: root.verifyPendingWindowDrop()
+  }
+
+  Timer {
+    id: tiledSwapStateProbeTimer
+    interval: 25
+    repeat: false
+    onTriggered: root.probeTiledWindowSwapState()
   }
 
   Timer {
@@ -1782,20 +2165,21 @@ Item {
       root.workspaceRevision += 1
       Qt.callLater(function() {
         root.dragGeometryOverrides = ({})
+        root.dragGeometryRevision += 1
         root.dragWorkspaceToplevelSnapshots = null
       })
     }
   }
 
   Process {
-    id: dragGeometryProbe
+    id: dragStateProbe
     command: ["hyprctl", "clients", "-j"]
     stdout: StdioCollector {
-      id: dragGeometryProbeOutput
+      id: dragStateProbeOutput
       waitForEnd: true
     }
     onExited: function(exitCode) {
-      root.updateDragGeometryOverrides(exitCode, dragGeometryProbeOutput.text)
+      root.recordActualDragPosition(exitCode, dragStateProbeOutput.text)
     }
   }
 
@@ -1808,6 +2192,18 @@ Item {
     }
     onExited: function(exitCode) {
       root.finishTiledWindowSwap(exitCode, cursorProbeOutput.text)
+    }
+  }
+
+  Process {
+    id: tiledSwapStateProbe
+    command: ["hyprctl", "clients", "-j"]
+    stdout: StdioCollector {
+      id: tiledSwapStateProbeOutput
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      root.finishTiledWindowSwapState(exitCode, tiledSwapStateProbeOutput.text)
     }
   }
 
@@ -2338,10 +2734,16 @@ Item {
                   keyboardSelected: root.selectedIndex === index
                   draggedToplevel: root.draggedToplevel
                   freezeDraggedPreview: root.dragPreviewFrozen
+                  centerDraggedPreview: {
+                    var revision = root.dragGeometryRevision
+                    return revision >= 0 && Boolean(root.dragStartState
+                      && root.dragStartState.temporarilyFloated)
+                  }
                   draggedSourceWorkspaceIdOverride: root.dragStartState
                     ? root.dragStartState.workspaceId : -1
                   toplevelsOverride: root.workspaceToplevelSnapshot(cardWorkspaceId)
                   geometryOverrides: root.dragGeometryOverrides
+                  geometryRevision: root.dragGeometryRevision
                   selectedToplevel: root.selectedToplevel
                   dragOverlay: dragPreviewOverlay
                   draggedFromWorkspaceCanvas: root.draggedFromWorkspaceCanvas
@@ -2372,6 +2774,12 @@ Item {
                       grabRatioX, grabRatioY)
                   }
                   onWindowDragFinished: function(toplevel) { root.endWindowDrag(toplevel) }
+                  onDragDiagnostic: function(eventName, details) {
+                    var motion = eventName.indexOf("position") >= 0
+                      || eventName.indexOf("move") >= 0
+                      || eventName === "preview-coordinate-map"
+                    root.logDrag(eventName, details, motion ? 100 : 0)
+                  }
                   onWindowDragEnteredWorkspace: function(workspaceId) {
                     if (root.draggedFromWorkspaceCanvas) {
                       root.dragShrinkProgress = 1
@@ -2384,10 +2792,12 @@ Item {
                       x, y, grabRatioX, grabRatioY, width, height)
                   }
                   onWindowDroppedOn: function(sourceToplevel, targetToplevel,
-                                              x, y, grabRatioX, grabRatioY) {
+                                              x, y, grabRatioX, grabRatioY,
+                                              targetRatioX, targetRatioY) {
                     root.dropWindowOnWorkspace(sourceToplevel,
                       cardWorkspaceId, x, y, grabRatioX, grabRatioY,
-                      width, height, targetToplevel)
+                      width, height, targetToplevel,
+                      targetRatioX, targetRatioY)
                   }
                 }
               }
@@ -2429,11 +2839,17 @@ Item {
                 keyboardSelected: true
                 draggedToplevel: root.draggedToplevel
                 freezeDraggedPreview: root.dragPreviewFrozen
+                centerDraggedPreview: {
+                  var revision = root.dragGeometryRevision
+                  return revision >= 0 && Boolean(root.dragStartState
+                    && root.dragStartState.temporarilyFloated)
+                }
                 draggedSourceWorkspaceIdOverride: root.dragStartState
                   ? root.dragStartState.workspaceId : -1
                 toplevelsOverride: root.workspaceToplevelSnapshot(
                   selectedWorkspaceArea.cardWorkspaceId)
                 geometryOverrides: root.dragGeometryOverrides
+                geometryRevision: root.dragGeometryRevision
                 selectedToplevel: root.selectedToplevel
                 dragOverlay: dragPreviewOverlay
                 draggedFromWorkspaceCanvas: root.draggedFromWorkspaceCanvas
@@ -2466,6 +2882,12 @@ Item {
                   root.updateDragShrinkProgress(pointerX, pointerY)
                 }
                 onWindowDragFinished: function(toplevel) { root.endWindowDrag(toplevel) }
+                onDragDiagnostic: function(eventName, details) {
+                  var motion = eventName.indexOf("position") >= 0
+                    || eventName.indexOf("move") >= 0
+                    || eventName === "preview-coordinate-map"
+                  root.logDrag(eventName, details, motion ? 100 : 0)
+                }
                 onWindowSelected: function(toplevel) { root.selectWindow(toplevel) }
                 onWindowActivated: function(toplevel) { root.focusToplevel(toplevel) }
                 onWindowDropped: function(toplevel, x, y, grabRatioX, grabRatioY) {
@@ -2474,11 +2896,13 @@ Item {
                     x, y, grabRatioX, grabRatioY, width, height)
                 }
                 onWindowDroppedOn: function(sourceToplevel, targetToplevel,
-                                            x, y, grabRatioX, grabRatioY) {
+                                            x, y, grabRatioX, grabRatioY,
+                                            targetRatioX, targetRatioY) {
                   root.dropWindowOnWorkspace(sourceToplevel,
                     selectedWorkspaceArea.cardWorkspaceId,
                     x, y, grabRatioX, grabRatioY,
-                    width, height, targetToplevel)
+                    width, height, targetToplevel,
+                    targetRatioX, targetRatioY)
                 }
               }
             }

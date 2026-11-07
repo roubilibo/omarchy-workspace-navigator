@@ -134,7 +134,7 @@ function workspaceTransform(monitor, screen, areaWidth, areaHeight) {
 
 function workspacePosition(monitor, screen, areaWidth, areaHeight,
                            areaX, areaY, grabRatioX, grabRatioY,
-                           windowWidth, windowHeight) {
+                           windowWidth, windowHeight, allowPartial) {
   var transform = workspaceTransform(monitor, screen, areaWidth, areaHeight)
   var x = finiteNumber(areaX)
   var y = finiteNumber(areaY)
@@ -148,6 +148,20 @@ function workspacePosition(monitor, screen, areaWidth, areaHeight,
     - ratioX * width
   var positionY = transform.originY + (y - transform.offsetY) / transform.scale
     - ratioY * height
+  if (allowPartial) {
+    // During a drag, keep a small portion visible but let the grabbed point
+    // continue tracking the pointer across the workspace edge.
+    var visibleWidth = Math.min(width * 0.5, transform.usableWidth)
+    var visibleHeight = Math.min(height * 0.5, transform.usableHeight)
+    return {
+      x: Math.round(clamp(positionX,
+        transform.originX - width + visibleWidth,
+        transform.originX + transform.usableWidth - visibleWidth)),
+      y: Math.round(clamp(positionY,
+        transform.originY - height + visibleHeight,
+        transform.originY + transform.usableHeight - visibleHeight))
+    }
+  }
   return {
     x: Math.round(clamp(positionX, transform.originX,
       Math.max(transform.originX, transform.originX + transform.usableWidth - width))),

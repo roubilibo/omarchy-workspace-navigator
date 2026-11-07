@@ -19,7 +19,7 @@ https://github.com/user-attachments/assets/0df6a9ee-ff00-40c7-9eb1-ff119a4b6a82
 - Left-click a workspace to enter it.
 - Left-click a window thumbnail to focus it.
 - Right-click a workspace for rename, persistence, move, and delete actions.
-- Drag windows between workspaces while preserving their floating or tiled state. A tiled window leaves the source layout during the drag without changing its floating state, so the remaining tiles can reflow; it returns to tiling when released.
+- Drag windows between workspaces while preserving their floating or tiled state. A tiled window becomes floating during the drag so the remaining tiles can reflow, then returns to tiling when released. Overview previews follow the reflow, and at least half of a dragged window stays visible near workspace edges.
 - Dragging a window from the large preview starts shrinking on pickup, continues as it approaches the strip, and fits the destination thumbnail on entry. Drags between strip thumbnails keep their size.
 - Drop a tiled window on another tiled window in the same workspace to swap their layout positions.
 - Delete empty workspaces added beyond the first five.
@@ -52,7 +52,7 @@ Horizontal two-finger touchpad swipes move through the workspace strip.
 - Click a workspace card to focus it.
 - Click a window thumbnail to focus that window.
 - Drag a floating thumbnail to reposition it, or drag any thumbnail to another workspace to move it.
-- Tiled windows leave the source layout during a drag without becoming floating, then return to tiling when released. Drop one on another tiled thumbnail in the same workspace to swap their layout positions.
+- Tiled windows become floating during a drag so other windows can reflow, then return to tiling when released. Drop one on another tiled thumbnail in the same workspace to swap their layout positions. At least half of the dragged window stays visible near workspace edges.
 - Right-click a workspace card to open its action menu.
 
 The setting is saved automatically. It can also be opened directly with:
@@ -60,6 +60,18 @@ The setting is saved automatically. It can also be opened directly with:
 ```bash
 omarchy-shell roubilibo.workspace-navigator settings
 ```
+
+### Development drag logs
+
+To trace overview drag and drop behavior, temporarily set `debugDrag` to
+`true` near the top of `src/Panel.qml`. The plugin emits structured lines with
+the `[workspace-navigator][drag]` prefix to the `omarchy-shell` process log.
+Pointer and drop-area position events are rate-limited to one line per event
+type every 100 ms. While a drag is active, the plugin samples
+`hyprctl clients -j` every 100 ms to update preview geometry; with `debugDrag`
+enabled, it also logs the compositor-reported position, the most recently
+requested position, and their difference. Set `debugDrag` back to `false`
+after collecting a trace.
 
 ### Alt+Tab
 

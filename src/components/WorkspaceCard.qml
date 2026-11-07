@@ -25,7 +25,9 @@ BorderSurface {
   property bool selectOnHover: true
   property var draggedToplevel: null
   property bool freezeDraggedPreview: false
+  property bool centerDraggedPreview: false
   property var geometryOverrides: ({})
+  property int geometryRevision: 0
   property Item dragOverlay: null
   property bool draggedFromWorkspaceCanvas: false
   property real dragShrinkProgress: 0
@@ -37,6 +39,7 @@ BorderSurface {
   property int toplevelRevision: 0
   property var toplevelsOverride: null
   property int draggedSourceWorkspaceIdOverride: -1
+  signal dragDiagnostic(string eventName, var details)
 
   readonly property var effectiveToplevels: {
     if (root.toplevelsOverride !== null) return root.toplevelsOverride
@@ -101,7 +104,17 @@ BorderSurface {
   signal windowDropped(var toplevel, real x, real y,
     real grabRatioX, real grabRatioY)
   signal windowDroppedOn(var sourceToplevel, var targetToplevel,
-    real x, real y, real grabRatioX, real grabRatioY)
+    real x, real y, real grabRatioX, real grabRatioY,
+    real targetRatioX, real targetRatioY)
+
+  function reportDragDiagnostic(eventName, details) {
+    var payload = Object.assign({
+      workspaceId: root.workspaceId,
+      sourceWorkspaceId: root.draggedSourceWorkspaceId,
+      sourceAddress: root.draggedToplevelAddress
+    }, details || {})
+    root.dragDiagnostic(eventName, payload)
+  }
 
   function isSameToplevel(left, right) {
     if (!left || !right) return false
@@ -236,9 +249,14 @@ BorderSurface {
 
           readonly property var previewToplevel: modelData && modelData.toplevel
             ? modelData.toplevel : modelData
-          readonly property var previewIpc: {
+          readonly property var previewGeometryOverride: {
+            var revision = root.geometryRevision
             var address = WindowModel.toplevelAddress(previewToplevel)
-            var override = address ? root.geometryOverrides[address] : null
+            return revision >= 0 && address
+              ? root.geometryOverrides[address] : null
+          }
+          readonly property var previewIpc: {
+            var override = previewGeometryOverride
             return override || (modelData && modelData.lastIpcObject
               ? modelData.lastIpcObject
               : (previewToplevel ? previewToplevel.lastIpcObject : null))
@@ -261,8 +279,8 @@ BorderSurface {
 
           x: displayGeometry.x
           y: displayGeometry.y
-          width: Math.max(1, dragging ? dragStartWidth : displayGeometry.width)
-          height: Math.max(1, dragging ? dragStartHeight : displayGeometry.height)
+          width: Math.max(1, displayGeometry.width)
+          height: Math.max(1, displayGeometry.height)
           // Hyprland paints floating clients above tiled clients. Keep the
           // navigator's stacking order consistent even when the IPC model
           // lists a floating client before a fullscreen-sized tiled client.
@@ -283,6 +301,8 @@ BorderSurface {
           workspaceFocused: root.focused
           draggedToplevel: root.draggedToplevel
           draggedSourceWorkspaceIdOverride: root.draggedSourceWorkspaceId
+          centerDraggedPreview: root.centerDraggedPreview
+            && root.isSameToplevel(root.draggedToplevel, previewToplevel)
           freezeDraggedPreview: root.freezeDraggedPreview
           selectedToplevel: root.selectedToplevel
           onDragStarted: function(toplevel, x, y) {
@@ -292,16 +312,26 @@ BorderSurface {
             var point = root.dragOverlay
               ? spatialPreview.mapFromItem(root.dragOverlay, x, y)
               : ({ x: x, y: y })
+            root.reportDragDiagnostic("preview-coordinate-map", {
+              address: WindowModel.toplevelAddress(toplevel),
+              overlayPosition: [x, y],
+              previewPosition: [point.x, point.y],
+              previewSize: [spatialPreview.width, spatialPreview.height]
+            })
             root.windowDragMoved(toplevel, point.x, point.y,
               grabRatioX, grabRatioY, x, y)
           }
           onDragFinished: root.windowDragFinished(previewToplevel)
+          onDragDiagnostic: function(eventName, details) {
+            root.dragDiagnostic(eventName, details)
+          }
           onWindowSelected: root.windowSelected(previewToplevel)
           onWindowActivated: root.windowActivated(previewToplevel)
           onWindowDroppedOn: function(sourceToplevel, targetToplevel,
-                                      x, y, grabRatioX, grabRatioY) {
+                                      x, y, grabRatioX, grabRatioY,
+                                      targetRatioX, targetRatioY) {
             root.windowDroppedOn(sourceToplevel, targetToplevel,
-              x, y, grabRatioX, grabRatioY)
+              x, y, grabRatioX, grabRatioY, targetRatioX, targetRatioY)
           }
         }
       }
@@ -416,23 +446,54 @@ BorderSurface {
     anchors.fill: parent
     // Thumbnail drop targets stay above this area; it handles workspace moves
     // and floating-window drops on otherwise empty parts of the card.
-    z: root.validDropTarget || root.draggedFloating ? 60 : 20
+    // Cross-workspace drops cover the card contents. For a same-workspace
+    // floating drag, keep this beneath previewArea so thumbnail targets can
+    // receive drops (the selected workspace becomes temporarily floating).
+    z: root.validDropTarget ? 60 : 24
     keys: ["omarchy-window"]
     enabled: !root.addWorkspace && (root.validDropTarget
       || (root.draggedFloating && root.draggedSourceWorkspaceId === root.workspaceId))
 
-    onEntered: if (root.validDropTarget)
-      root.windowDragEnteredWorkspace(root.workspaceId)
+    onEntered: function(drag) {
+      root.reportDragDiagnostic("workspace-target-enter", {
+        targetKind: "workspace",
+        sourceAddress: drag.source && drag.source.toplevel
+          ? WindowModel.toplevelAddress(drag.source.toplevel) : ""
+      })
+      if (root.validDropTarget) root.windowDragEnteredWorkspace(root.workspaceId)
+    }
+
+    onExited: root.reportDragDiagnostic("workspace-target-exit", {
+      targetKind: "workspace"
+    })
+
+    onPositionChanged: function(drag) {
+      root.reportDragDiagnostic("workspace-target-position", {
+        targetKind: "workspace", localPosition: [drag.x, drag.y],
+        containsDrag: dropArea.containsDrag
+      })
+    }
 
     onDropped: function(drop) {
       var sameWorkspaceFloating = root.draggedFloating
         && root.draggedSourceWorkspaceId === root.workspaceId
       if ((!root.validDropTarget && !sameWorkspaceFloating)
           || !drop.source || !drop.source.toplevel) {
+        root.reportDragDiagnostic("workspace-target-drop-rejected", {
+          targetKind: "workspace",
+          hasSource: Boolean(drop.source),
+          hasToplevel: Boolean(drop.source && drop.source.toplevel),
+          validDropTarget: root.validDropTarget,
+          sameWorkspaceFloating: sameWorkspaceFloating
+        })
         drop.accepted = false
         return
       }
       drop.acceptProposedAction()
+      root.reportDragDiagnostic("workspace-target-drop", {
+        targetKind: "workspace", localPosition: [drop.x, drop.y],
+        floating: root.draggedFloating
+      })
       root.windowDropped(drop.source.toplevel, drop.x, drop.y,
         drop.source.dragGrabRatioX, drop.source.dragGrabRatioY)
     }
