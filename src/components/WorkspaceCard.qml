@@ -29,12 +29,15 @@ BorderSurface {
   property int geometryRevision: 0
   property Item dragOverlay: null
   property bool draggedFromWorkspaceCanvas: false
+  property bool keepDraggedPreviewOnly: false
   property real dragShrinkProgress: 0
   property real dragTargetWidth: 0
   property real dragTargetHeight: 0
   property var selectedToplevel: null
   property bool livePreviews: false
   property bool liveCaptureAll: false
+  property bool liveCaptureHovered: true
+  property bool liveCaptureDragged: true
   property int toplevelRevision: 0
   property var toplevelsOverride: null
   property int draggedSourceWorkspaceIdOverride: -1
@@ -280,6 +283,8 @@ BorderSurface {
           y: displayGeometry.y
           width: Math.max(1, displayGeometry.width)
           height: Math.max(1, displayGeometry.height)
+          visible: !root.keepDraggedPreviewOnly
+            || root.isSameToplevel(root.draggedToplevel, previewToplevel)
           // Hyprland paints floating clients above tiled clients. Keep the
           // navigator's stacking order consistent even when the IPC model
           // lists a floating client before a fullscreen-sized tiled client.
@@ -295,8 +300,12 @@ BorderSurface {
           isGroup: Boolean(modelData && modelData.isGroup)
           groupMembers: modelData && modelData.members ? modelData.members : []
           liveCaptureEnabled: root.livePreviews && root.visible
-            && (root.liveCaptureAll || root.hovered
-              || root.isSameToplevel(root.draggedToplevel, previewToplevel))
+            && ((root.liveCaptureAll
+                || (root.liveCaptureHovered && root.hovered))
+              && (!root.isSameToplevel(root.draggedToplevel, previewToplevel)
+                || root.liveCaptureDragged)
+              || (root.liveCaptureDragged
+                && root.isSameToplevel(root.draggedToplevel, previewToplevel)))
           workspaceFocused: root.focused
           draggedToplevel: root.draggedToplevel
           draggedSourceWorkspaceIdOverride: root.draggedSourceWorkspaceId
@@ -457,7 +466,16 @@ BorderSurface {
         sourceAddress: drag.source && drag.source.toplevel
           ? WindowModel.toplevelAddress(drag.source.toplevel) : ""
       })
-      if (root.validDropTarget) root.windowDragEnteredWorkspace(root.workspaceId)
+      // A live DragHandler can suppress MouseArea/HoverHandler hover events.
+      // The drop enter still provides the workspace preview selection.
+      if (root.selectOnHover) {
+        root.reportDragDiagnostic("workspace-preview-hover-select", {
+          targetWorkspaceId: root.workspaceId
+        })
+        root.workspaceHovered()
+      }
+      if (root.validDropTarget)
+        root.windowDragEnteredWorkspace(root.workspaceId)
     }
 
     onExited: root.reportDragDiagnostic("workspace-target-exit", {

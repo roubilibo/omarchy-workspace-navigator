@@ -22,6 +22,9 @@ Item {
   property var manifest: null
   property bool opened: false
   property int selectedIndex: 0
+  // A drag can preview another workspace without replacing the selected
+  // canvas that owns the active WindowPreview DragHandler.
+  property int dragPreviewWorkspaceId: -1
   // Selection belongs to the overview only. Do not focus the real compositor
   // window here: focusing it can switch workspaces and warp the cursor.
   property var selectedToplevel: null
@@ -37,7 +40,7 @@ Item {
   // rebuilt while the panel is open.
   property int workspaceRevision: 0
   // Set true temporarily while diagnosing overview drag/drop behavior.
-  property bool debugDrag:true
+  property bool debugDrag:false
   property var dragLogTimes: ({})
   property string dragProbeAddress: ""
   property int dragProbeWorkspaceId: -1
@@ -452,32 +455,36 @@ Item {
   }
 
   function selectWorkspacePreview(id) {
-    // The selected workspace owns the source WindowPreview in the large
-    // canvas. Replacing it while a drag is over the strip destroys the active
-    // DragHandler before the destination DropArea can finish the gesture.
-    if (root.draggedToplevel) return
     var entries = root.workspaceEntries(root.workspaceRevision)
     for (var i = 0; i < entries.length; i++) {
       if (!entries[i].addWorkspace && Number(entries[i].id) === Number(id)) {
-        root.selectedIndex = i
+        if (root.draggedToplevel)
+          root.dragPreviewWorkspaceId = Number(entries[i].id)
+        else {
+          root.dragPreviewWorkspaceId = -1
+          root.selectedIndex = i
+        }
         return
       }
     }
+    if (root.draggedToplevel) root.dragPreviewWorkspaceId = -1
   }
 
   function selectWorkspacePreviewAfterDrop(id) {
     var workspaceId = root.positiveWorkspaceId(id)
     if (workspaceId < 1) return
-    Qt.callLater(function() {
+    var selectWorkspace = function() {
       var entries = root.workspaceEntries(root.workspaceRevision)
       for (var i = 0; i < entries.length; i++) {
         if (!entries[i].addWorkspace && Number(entries[i].id) === workspaceId) {
           root.selectedIndex = i
           root.ensureSelectionVisible()
-          return
+          return true
         }
       }
-    })
+      return false
+    }
+    if (!selectWorkspace()) Qt.callLater(selectWorkspace)
   }
 
   function selectRow(delta) {
@@ -1023,6 +1030,7 @@ Item {
 
   function beginWindowDrag(toplevel, fromWorkspaceCanvas) {
     root.refreshAfterDrag = false
+    root.dragPreviewWorkspaceId = -1
     root.dragGeometryOverrides = ({})
     root.dragGeometryRevision += 1
     root.draggedFromWorkspaceCanvas = Boolean(fromWorkspaceCanvas)
@@ -1184,6 +1192,10 @@ Item {
     var droppedWorkspaceId = root.pendingWindowDrop
       && root.pendingWindowDrop.address === root.normalizedAddress(toplevel)
       ? root.pendingWindowDrop.workspaceId : -1
+    var hoveredPreviewWorkspaceId = root.positiveWorkspaceId(
+      root.dragPreviewWorkspaceId)
+    var finalPreviewWorkspaceId = droppedWorkspaceId > 0
+      ? droppedWorkspaceId : hoveredPreviewWorkspaceId
     root.logDrag("gesture-finish", {
       address: root.normalizedAddress(toplevel),
       droppedWorkspaceId: droppedWorkspaceId,
@@ -1207,12 +1219,13 @@ Item {
     if (!root.draggedToplevel || root.draggedToplevel === toplevel)
       root.draggedToplevel = null
     root.dragStartState = null
+    root.dragPreviewWorkspaceId = -1
     if (root.refreshAfterDrag) {
       root.refreshAfterDrag = false
       dragRefreshTimer.restart()
     }
-    if (droppedWorkspaceId > 0)
-      root.selectWorkspacePreviewAfterDrop(droppedWorkspaceId)
+    if (finalPreviewWorkspaceId > 0)
+      root.selectWorkspacePreviewAfterDrop(finalPreviewWorkspaceId)
   }
 
   function moveWindowToWorkspace(toplevel, workspaceId) {
@@ -2731,7 +2744,10 @@ Item {
                   contextTarget: keyCatcher
                   focused: !addCard && Hyprland.focusedWorkspace !== null
                     && Hyprland.focusedWorkspace.id === cardWorkspaceId
-                  keyboardSelected: root.selectedIndex === index
+                  keyboardSelected: root.draggedToplevel
+                    && root.dragPreviewWorkspaceId > 0
+                    ? (!addCard && root.dragPreviewWorkspaceId === cardWorkspaceId)
+                    : root.selectedIndex === index
                   draggedToplevel: root.draggedToplevel
                   freezeDraggedPreview: root.dragPreviewFrozen
                   draggedSourceWorkspaceIdOverride: root.dragStartState
@@ -2746,7 +2762,12 @@ Item {
                   dragTargetWidth: root.workspaceThumbnailWidth
                   dragTargetHeight: workspaceFlickable.thumbnailHeight
                   livePreviews: root.opened && panelWindow.visible
-                  liveCaptureAll: true
+                  // Other workspace thumbnails stay cached. The active
+                  // canvas owns workspace-wide live capture; keep only the
+                  // strip's dragged source live when the drag began here.
+                  liveCaptureAll: false
+                  liveCaptureHovered: false
+                  liveCaptureDragged: !root.draggedFromWorkspaceCanvas
                   toplevelRevision: root.workspaceRevision
                   onWorkspaceHovered: root.selectWorkspacePreview(cardWorkspaceId)
                   onWorkspaceActivated: {
@@ -2808,36 +2829,57 @@ Item {
                 : ({ addWorkspace: true, id: 0 })
               readonly property bool addCard: Boolean(selectedEntry.addWorkspace)
               readonly property int cardWorkspaceId: Number(selectedEntry.id)
+              readonly property int previewWorkspaceId:
+                root.positiveWorkspaceId(root.dragPreviewWorkspaceId)
+              // Keep the active source delegate mounted while the selected
+              // workspace is previewed in the overlay below.
+              readonly property int dragSourceCanvasWorkspaceId:
+                root.draggedFromWorkspaceCanvas && root.dragStartState
+                  ? Number(root.dragStartState.workspaceId) : -1
+              readonly property bool retainingDragSourceCanvas:
+                dragSourceCanvasWorkspaceId > 0
+                  && dragSourceCanvasWorkspaceId !== cardWorkspaceId
+              readonly property int canvasWorkspaceId:
+                retainingDragSourceCanvas
+                  ? dragSourceCanvasWorkspaceId : cardWorkspaceId
+              readonly property bool canvasAddCard:
+                !retainingDragSourceCanvas && addCard
+              readonly property bool showingDragPreview:
+                root.draggedToplevel !== null && previewWorkspaceId > 0
+                  && previewWorkspaceId !== canvasWorkspaceId
 
+              // This card retains the original drag source and hides its
+              // sibling thumbnails while another workspace is being previewed.
               WorkspaceCard {
                 anchors.fill: parent
                 showBorder: false
                 showBackground: false
                 showSelectionFill: false
-                workspaceId: selectedWorkspaceArea.addCard ? 0
-                  : selectedWorkspaceArea.cardWorkspaceId
-                addWorkspace: selectedWorkspaceArea.addCard
-                deletable: !selectedWorkspaceArea.addCard
-                  && selectedWorkspaceArea.cardWorkspaceId > root.minimumWorkspaceCount
-                workspace: selectedWorkspaceArea.addCard ? null
-                  : root.workspaceById(selectedWorkspaceArea.cardWorkspaceId,
+                keepDraggedPreviewOnly: selectedWorkspaceArea.retainingDragSourceCanvas
+                workspaceId: selectedWorkspaceArea.canvasAddCard ? 0
+                  : selectedWorkspaceArea.canvasWorkspaceId
+                addWorkspace: selectedWorkspaceArea.canvasAddCard
+                deletable: !selectedWorkspaceArea.canvasAddCard
+                  && selectedWorkspaceArea.canvasWorkspaceId > root.minimumWorkspaceCount
+                workspace: selectedWorkspaceArea.canvasAddCard ? null
+                  : root.workspaceById(selectedWorkspaceArea.canvasWorkspaceId,
                     root.workspaceRevision)
-                workspaceName: selectedWorkspaceArea.addCard ? ""
+                workspaceName: selectedWorkspaceArea.canvasAddCard ? ""
                   : root.workspaceName(
-                    root.workspaceById(selectedWorkspaceArea.cardWorkspaceId,
-                      root.workspaceRevision), selectedWorkspaceArea.cardWorkspaceId)
+                    root.workspaceById(selectedWorkspaceArea.canvasWorkspaceId,
+                      root.workspaceRevision), selectedWorkspaceArea.canvasWorkspaceId)
                 previewScreen: panelScreen
                 contextTarget: keyCatcher
-                focused: !selectedWorkspaceArea.addCard
+                focused: !selectedWorkspaceArea.canvasAddCard
                   && Hyprland.focusedWorkspace !== null
-                  && Hyprland.focusedWorkspace.id === selectedWorkspaceArea.cardWorkspaceId
+                  && Hyprland.focusedWorkspace.id === selectedWorkspaceArea.canvasWorkspaceId
                 keyboardSelected: true
                 draggedToplevel: root.draggedToplevel
                 freezeDraggedPreview: root.dragPreviewFrozen
                 draggedSourceWorkspaceIdOverride: root.dragStartState
                   ? root.dragStartState.workspaceId : -1
                 toplevelsOverride: root.workspaceToplevelSnapshot(
-                  selectedWorkspaceArea.cardWorkspaceId)
+                  selectedWorkspaceArea.canvasWorkspaceId)
                 geometryOverrides: root.dragGeometryOverrides
                 geometryRevision: root.dragGeometryRevision
                 selectedToplevel: root.selectedToplevel
@@ -2847,18 +2889,21 @@ Item {
                 dragTargetWidth: root.workspaceThumbnailWidth
                 dragTargetHeight: workspaceFlickable.thumbnailHeight
                 livePreviews: root.opened && panelWindow.visible
+                liveCaptureAll: !selectedWorkspaceArea.showingDragPreview
+                liveCaptureHovered: false
+                liveCaptureDragged: root.draggedFromWorkspaceCanvas
                 toplevelRevision: root.workspaceRevision
                 onWorkspaceHovered: {}
                 onWorkspaceActivated: {
-                  if (selectedWorkspaceArea.addCard) root.addWorkspace()
-                  else root.focusWorkspace(selectedWorkspaceArea.cardWorkspaceId)
+                  if (selectedWorkspaceArea.canvasAddCard) root.addWorkspace()
+                  else root.focusWorkspace(selectedWorkspaceArea.canvasWorkspaceId)
                 }
                 onWorkspaceContextRequested: function(x, y) {
-                  root.openWorkspaceContext(selectedWorkspaceArea.cardWorkspaceId, x, y)
+                  root.openWorkspaceContext(selectedWorkspaceArea.canvasWorkspaceId, x, y)
                 }
                 onAddWorkspaceRequested: root.addWorkspace()
                 onWorkspaceDeleteRequested: root.deleteWorkspace(
-                  selectedWorkspaceArea.cardWorkspaceId)
+                  selectedWorkspaceArea.canvasWorkspaceId)
                 onWindowDragStarted: function(toplevel) {
                   root.selectWindow(toplevel)
                   root.beginWindowDrag(toplevel, true)
@@ -2867,7 +2912,7 @@ Item {
                                             grabRatioX, grabRatioY,
                                             pointerX, pointerY) {
                   root.queueFloatingWindowDragMove(toplevel,
-                    selectedWorkspaceArea.cardWorkspaceId, x, y,
+                    selectedWorkspaceArea.canvasWorkspaceId, x, y,
                     width, height, grabRatioX, grabRatioY)
                   root.updateDragShrinkProgress(pointerX, pointerY)
                 }
@@ -2882,14 +2927,98 @@ Item {
                 onWindowActivated: function(toplevel) { root.focusToplevel(toplevel) }
                 onWindowDropped: function(toplevel, x, y, grabRatioX, grabRatioY) {
                   root.dropWindowOnWorkspace(toplevel,
-                    selectedWorkspaceArea.cardWorkspaceId,
+                    selectedWorkspaceArea.canvasWorkspaceId,
                     x, y, grabRatioX, grabRatioY, width, height)
                 }
                 onWindowDroppedOn: function(sourceToplevel, targetToplevel,
                                             x, y, grabRatioX, grabRatioY,
                                             targetRatioX, targetRatioY) {
                   root.dropWindowOnWorkspace(sourceToplevel,
-                    selectedWorkspaceArea.cardWorkspaceId,
+                    selectedWorkspaceArea.canvasWorkspaceId,
+                    x, y, grabRatioX, grabRatioY,
+                    width, height, targetToplevel,
+                    targetRatioX, targetRatioY)
+                }
+              }
+
+              // The hovered strip workspace can change without destroying the
+              // active DragHandler kept alive by the card above.
+              WorkspaceCard {
+                anchors.fill: parent
+                z: 1
+                visible: selectedWorkspaceArea.showingDragPreview
+                showBorder: false
+                showBackground: false
+                showSelectionFill: false
+                workspaceId: selectedWorkspaceArea.previewWorkspaceId
+                addWorkspace: false
+                deletable: selectedWorkspaceArea.previewWorkspaceId
+                  > root.minimumWorkspaceCount
+                workspace: root.workspaceById(
+                  selectedWorkspaceArea.previewWorkspaceId, root.workspaceRevision)
+                workspaceName: root.workspaceName(
+                  root.workspaceById(selectedWorkspaceArea.previewWorkspaceId,
+                    root.workspaceRevision), selectedWorkspaceArea.previewWorkspaceId)
+                previewScreen: panelScreen
+                contextTarget: keyCatcher
+                focused: Hyprland.focusedWorkspace !== null
+                  && Hyprland.focusedWorkspace.id === selectedWorkspaceArea.previewWorkspaceId
+                keyboardSelected: true
+                activateOnClick: false
+                selectOnHover: false
+                draggedToplevel: root.draggedToplevel
+                freezeDraggedPreview: root.dragPreviewFrozen
+                draggedSourceWorkspaceIdOverride: root.dragStartState
+                  ? root.dragStartState.workspaceId : -1
+                toplevelsOverride: root.workspaceToplevelSnapshot(
+                  selectedWorkspaceArea.previewWorkspaceId)
+                geometryOverrides: root.dragGeometryOverrides
+                geometryRevision: root.dragGeometryRevision
+                selectedToplevel: root.selectedToplevel
+                dragOverlay: dragPreviewOverlay
+                draggedFromWorkspaceCanvas: root.draggedFromWorkspaceCanvas
+                dragShrinkProgress: root.dragShrinkProgress
+                dragTargetWidth: root.workspaceThumbnailWidth
+                dragTargetHeight: workspaceFlickable.thumbnailHeight
+                livePreviews: root.opened && panelWindow.visible
+                liveCaptureAll: true
+                liveCaptureHovered: false
+                liveCaptureDragged: root.draggedFromWorkspaceCanvas
+                toplevelRevision: root.workspaceRevision
+                onWorkspaceHovered: {}
+                onWorkspaceActivated: root.focusWorkspace(
+                  selectedWorkspaceArea.previewWorkspaceId)
+                onWorkspaceContextRequested: function(x, y) {
+                  root.openWorkspaceContext(selectedWorkspaceArea.previewWorkspaceId, x, y)
+                }
+                onAddWorkspaceRequested: root.addWorkspace()
+                onWorkspaceDeleteRequested: root.deleteWorkspace(
+                  selectedWorkspaceArea.previewWorkspaceId)
+                onWindowDragStarted: function(toplevel) {
+                  root.selectWindow(toplevel)
+                  root.beginWindowDrag(toplevel, true)
+                }
+                onWindowDragMoved: function(toplevel, x, y,
+                                            grabRatioX, grabRatioY,
+                                            pointerX, pointerY) {
+                  root.queueFloatingWindowDragMove(toplevel,
+                    selectedWorkspaceArea.previewWorkspaceId, x, y,
+                    width, height, grabRatioX, grabRatioY)
+                  root.updateDragShrinkProgress(pointerX, pointerY)
+                }
+                onWindowDragFinished: function(toplevel) { root.endWindowDrag(toplevel) }
+                onWindowSelected: function(toplevel) { root.selectWindow(toplevel) }
+                onWindowActivated: function(toplevel) { root.focusToplevel(toplevel) }
+                onWindowDropped: function(toplevel, x, y, grabRatioX, grabRatioY) {
+                  root.dropWindowOnWorkspace(toplevel,
+                    selectedWorkspaceArea.previewWorkspaceId,
+                    x, y, grabRatioX, grabRatioY, width, height)
+                }
+                onWindowDroppedOn: function(sourceToplevel, targetToplevel,
+                                            x, y, grabRatioX, grabRatioY,
+                                            targetRatioX, targetRatioY) {
+                  root.dropWindowOnWorkspace(sourceToplevel,
+                    selectedWorkspaceArea.previewWorkspaceId,
                     x, y, grabRatioX, grabRatioY,
                     width, height, targetToplevel,
                     targetRatioX, targetRatioY)
