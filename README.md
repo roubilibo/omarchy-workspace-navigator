@@ -3,9 +3,12 @@
 Workspace navigation panel for Omarchy Shell with live Hyprland window
 thumbnails.
 
-https://github.com/user-attachments/assets/05c1dcf1-332a-4b1e-b2d7-3017d8340ca5
 
-![Workspace Navigator preview](preview.png)
+
+https://github.com/user-attachments/assets/0df6a9ee-ff00-40c7-9eb1-ff119a4b6a82
+
+
+
 
 
 ## Features
