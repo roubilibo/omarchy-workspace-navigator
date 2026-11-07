@@ -14,8 +14,13 @@ Rectangle {
   property bool isGroup: false
   property var groupMembers: []
   property var draggedToplevel: null
+  property int draggedSourceWorkspaceIdOverride: -1
+  property bool freezeDraggedPreview: false
   property Item homeParent: null
   property Item dragOverlay: null
+  property real dragShrinkProgress: 0
+  property real dragTargetWidth: 0
+  property real dragTargetHeight: 0
   property var selectedToplevel: null
   property bool liveCaptureEnabled: false
   property bool workspaceFocused: false
@@ -37,11 +42,15 @@ Rectangle {
   // Cross-workspace drops belong to the workspace card. Keeping this drop
   // area limited to same-workspace targets prevents a thumbnail from
   // intercepting the card-level move handler.
+  readonly property int draggedSourceWorkspaceId:
+    root.draggedSourceWorkspaceIdOverride > 0
+      ? Number(root.draggedSourceWorkspaceIdOverride)
+      : (root.draggedToplevel && root.draggedToplevel.workspace
+        ? Number(root.draggedToplevel.workspace.id) : -1)
   readonly property bool sameWorkspace: root.draggedToplevel !== null
-    && root.draggedToplevel.workspace !== null
+    && root.draggedSourceWorkspaceId > 0
     && root.toplevel.workspace !== null
-    && Number(root.draggedToplevel.workspace.id)
-      === Number(root.toplevel.workspace.id)
+    && root.draggedSourceWorkspaceId === Number(root.toplevel.workspace.id)
   readonly property bool dragging: dragProxy.dragSessionActive
   readonly property real dragTranslationX: root.dragging
     ? root.dragLastTranslationX : 0
@@ -54,7 +63,7 @@ Rectangle {
 
   readonly property int maximumTitleLength: 512
 
-  signal dragStarted(var toplevel)
+  signal dragStarted(var toplevel, real x, real y)
   signal dragMoved(var toplevel, real x, real y,
     real grabRatioX, real grabRatioY)
   signal dragFinished(var toplevel)
@@ -111,7 +120,9 @@ Rectangle {
   radius: Style.cornerRadius
   color: Util.alpha(Color.background, 0.58)
   clip: true
-  opacity: root.dragging ? 0.58 : 1
+  // The source is hidden while dragging. Keep the live proxy fully opaque so
+  // shrinking it does not wash out its corner mask and border.
+  opacity: 1
 
   Item {
     id: previewViewport
@@ -185,8 +196,10 @@ Rectangle {
   }
 
   Rectangle {
+    id: previewBorder
     anchors.fill: parent
     z: 5
+    visible: !root.dragging
     border.width: Math.max(1, Style.normalBorderWidth)
       + (root.workspaceFocused ? Style.space(1) : 0)
     border.color: previewHover.hovered || root.dragging || root.selected
@@ -341,7 +354,9 @@ Rectangle {
         root.dragGrabRatioY = Math.max(0, Math.min(1,
           previewDrag.centroid.pressPosition.y / Math.max(1, root.height)))
         dragProxy.dragSessionActive = true
-        root.dragStarted(root.toplevel)
+        root.dragStarted(root.toplevel,
+          root.dragStartX + previewDrag.centroid.pressPosition.x,
+          root.dragStartY + previewDrag.centroid.pressPosition.y)
       } else if (dragProxy.dragSessionActive) {
         dragProxy.Drag.drop()
         dragProxy.dragSessionActive = false
@@ -359,6 +374,18 @@ Rectangle {
         root.dragStartY + previewDrag.centroid.pressPosition.y
           + previewDrag.translation.y,
         root.dragGrabRatioX, root.dragGrabRatioY)
+    }
+  }
+
+  Component.onDestruction: {
+    // Moving a tiled client updates Hyprland's model during the gesture. If
+    // that update destroys this delegate, DragHandler may never report its
+    // usual inactive transition, leaving the client in the private drag
+    // workspace. Finish through the same recovery path before this delegate
+    // goes away.
+    if (dragProxy.dragSessionActive) {
+      dragProxy.dragSessionActive = false
+      root.dragFinished(root.toplevel)
     }
   }
 
@@ -388,15 +415,58 @@ Rectangle {
   ShaderEffectSource {
     id: dragVisual
     parent: root.dragOverlay
-    x: root.dragging ? root.dragStartX + root.dragTranslationX : 0
-    y: root.dragging ? root.dragStartY + root.dragTranslationY : 0
-    width: root.width
-    height: root.height
+    readonly property real fittedTargetScale: Math.max(0.01, Math.min(1,
+      Math.min(root.dragTargetWidth / Math.max(1, root.dragStartWidth),
+        root.dragTargetHeight / Math.max(1, root.dragStartHeight))))
+    // Interpolate uniformly to the largest size that fits the strip card, so
+    // the window keeps its own aspect ratio and ends at thumbnail scale.
+    readonly property real targetScale: 1
+      - (1 - fittedTargetScale)
+        * Math.max(0, Math.min(1, root.dragShrinkProgress))
+    width: root.dragging ? root.dragStartWidth * targetScale : root.width
+    height: root.dragging ? root.dragStartHeight * targetScale : root.height
+    x: root.dragging
+      ? root.dragStartX + root.dragTranslationX
+        + (root.dragStartWidth - width) * root.dragGrabRatioX : 0
+    y: root.dragging
+      ? root.dragStartY + root.dragTranslationY
+        + (root.dragStartHeight - height) * root.dragGrabRatioY : 0
     z: 1000000
     visible: root.dragging && root.dragOverlay !== null
     sourceItem: root
-    live: root.dragging
+    live: root.dragging && !root.freezeDraggedPreview
     hideSource: root.dragging
+
+    Behavior on width {
+      NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+    }
+    Behavior on height {
+      NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
+    }
+  }
+
+  // Draw the accent outline once, at the snapshot's actual animated scale.
+  // Leave the snapshot as a direct ShaderEffectSource; applying an effect
+  // layer here can make its live texture disappear during a drag.
+  Rectangle {
+    id: dragVisualBorder
+    parent: root.dragOverlay
+    readonly property real renderedScale: Math.max(0.01, Math.min(
+      width / Math.max(1, root.dragStartWidth),
+      height / Math.max(1, root.dragStartHeight)))
+    x: dragVisual.x
+    y: dragVisual.y
+    width: dragVisual.width
+    height: dragVisual.height
+    z: dragVisual.z + 1
+    visible: dragVisual.visible
+    color: "transparent"
+    radius: Math.min(root.radius * renderedScale,
+      Math.min(width, height) / 2)
+    border.width: Math.max(1,
+      (Style.normalBorderWidth + Style.space(1)) * renderedScale)
+    border.color: Color.accent
+    antialiasing: true
   }
 
   parent: root.homeParent

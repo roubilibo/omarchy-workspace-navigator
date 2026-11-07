@@ -15,17 +15,31 @@ BorderSurface {
   property var previewScreen: null
   property Item contextTarget: null
   property bool focused: false
+  property bool showBorder: true
+  property bool showBackground: true
+  property bool showSelectionFill: true
   property bool addWorkspace: false
   property bool deletable: false
   property bool keyboardSelected: false
+  property bool activateOnClick: true
+  property bool selectOnHover: true
   property var draggedToplevel: null
+  property bool freezeDraggedPreview: false
   property var geometryOverrides: ({})
   property Item dragOverlay: null
+  property bool draggedFromWorkspaceCanvas: false
+  property real dragShrinkProgress: 0
+  property real dragTargetWidth: 0
+  property real dragTargetHeight: 0
   property var selectedToplevel: null
   property bool livePreviews: false
+  property bool liveCaptureAll: false
   property int toplevelRevision: 0
+  property var toplevelsOverride: null
+  property int draggedSourceWorkspaceIdOverride: -1
 
   readonly property var effectiveToplevels: {
+    if (root.toplevelsOverride !== null) return root.toplevelsOverride
     var revision = root.toplevelRevision
     var activeAddress = Hyprland.activeToplevel ? Hyprland.activeToplevel.address : ""
     return WindowModel.resolveWorkspacePreviews(
@@ -45,8 +59,10 @@ BorderSurface {
     ? root.draggedToplevel.workspace : null
   readonly property string draggedToplevelAddress: WindowModel.toplevelAddress(
     root.draggedToplevel)
-  readonly property int draggedSourceWorkspaceId: root.draggedWorkspace
-    ? Number(root.draggedWorkspace.id) : -1
+  readonly property int draggedSourceWorkspaceId:
+    root.draggedSourceWorkspaceIdOverride > 0
+      ? Number(root.draggedSourceWorkspaceIdOverride)
+      : (root.draggedWorkspace ? Number(root.draggedWorkspace.id) : -1)
   readonly property bool validDropTarget: root.draggedToplevel !== null
     && root.draggedToplevelAddress !== ""
     && root.workspaceId > 0
@@ -75,10 +91,11 @@ BorderSurface {
   signal workspaceHovered()
   signal addWorkspaceRequested()
   signal workspaceDeleteRequested()
-  signal windowDragStarted(var toplevel)
+  signal windowDragStarted(var toplevel, real x, real y)
   signal windowDragMoved(var toplevel, real x, real y,
-    real grabRatioX, real grabRatioY)
+    real grabRatioX, real grabRatioY, real pointerX, real pointerY)
   signal windowDragFinished(var toplevel)
+  signal windowDragEnteredWorkspace(int workspaceId)
   signal windowSelected(var toplevel)
   signal windowActivated(var toplevel)
   signal windowDropped(var toplevel, real x, real y,
@@ -104,11 +121,13 @@ BorderSurface {
   }
 
   radius: Style.cornerRadius
-  color: root.occupied || root.focused
-    ? Color.menu.background : (root.addWorkspace
-      ? Util.alpha(Color.accent, 0.10)
-      : Util.alpha(Color.menu.background, 0.90))
-  borderSpec: root.cardBorderSpec
+  color: root.showBackground
+    ? (root.occupied || root.focused
+      ? Color.menu.background : (root.addWorkspace
+        ? Util.alpha(Color.accent, 0.10)
+        : Util.alpha(Color.menu.background, 0.90)))
+    : "transparent"
+  borderSpec: root.showBorder ? root.cardBorderSpec : Border.none()
   clip: true
 
   // Left-clicking the card enters the workspace. Window thumbnails sit above
@@ -121,7 +140,7 @@ BorderSurface {
       ? (Qt.LeftButton | Qt.RightButton) : (Qt.LeftButton | Qt.RightButton)
     hoverEnabled: true
     cursorShape: Qt.PointingHandCursor
-    onEntered: root.workspaceHovered()
+    onEntered: if (root.selectOnHover) root.workspaceHovered()
     onClicked: function(mouse) {
       if (mouse.button === Qt.RightButton && !root.addWorkspace) {
         var point = root.contextTarget
@@ -130,6 +149,8 @@ BorderSurface {
         root.workspaceContextRequested(point.x, point.y)
       } else if (root.addWorkspace) {
         root.addWorkspaceRequested()
+      } else if (!root.activateOnClick) {
+        root.workspaceHovered()
       } else {
         root.workspaceActivated()
       }
@@ -145,9 +166,12 @@ BorderSurface {
     acceptedButtons: Qt.LeftButton
     hoverEnabled: true
     cursorShape: Qt.ArrowCursor
-    onEntered: root.workspaceHovered()
+    onEntered: if (root.selectOnHover) root.workspaceHovered()
     onClicked: function(mouse) {
-      if (mouse.button === Qt.LeftButton) root.workspaceActivated()
+      if (mouse.button === Qt.LeftButton) {
+        if (root.activateOnClick) root.workspaceActivated()
+        else root.workspaceHovered()
+      }
       else mouse.accepted = true
     }
   }
@@ -157,7 +181,7 @@ BorderSurface {
     z: 2
     color: root.dropHovered
       ? Style.selectedFillFor(Color.menu.text, Color.accent)
-      : (root.validDropTarget || root.keyboardSelected
+      : (root.validDropTarget || (root.showSelectionFill && root.keyboardSelected)
         ? Style.hoverFillFor(Color.menu.text, Color.accent) : "transparent")
     Behavior on color { ColorAnimation { duration: 80 } }
   }
@@ -246,21 +270,30 @@ BorderSurface {
           toplevel: previewToplevel
           homeParent: spatialPreview
           dragOverlay: root.dragOverlay
+          dragShrinkProgress: root.draggedFromWorkspaceCanvas
+            && root.isSameToplevel(root.draggedToplevel, previewToplevel)
+            ? root.dragShrinkProgress : 0
+          dragTargetWidth: root.dragTargetWidth
+          dragTargetHeight: root.dragTargetHeight
           isGroup: Boolean(modelData && modelData.isGroup)
           groupMembers: modelData && modelData.members ? modelData.members : []
           liveCaptureEnabled: root.livePreviews && root.visible
-            && (root.hovered
+            && (root.liveCaptureAll || root.hovered
               || root.isSameToplevel(root.draggedToplevel, previewToplevel))
           workspaceFocused: root.focused
           draggedToplevel: root.draggedToplevel
+          draggedSourceWorkspaceIdOverride: root.draggedSourceWorkspaceId
+          freezeDraggedPreview: root.freezeDraggedPreview
           selectedToplevel: root.selectedToplevel
-          onDragStarted: root.windowDragStarted(previewToplevel)
+          onDragStarted: function(toplevel, x, y) {
+            root.windowDragStarted(previewToplevel, x, y)
+          }
           onDragMoved: function(toplevel, x, y, grabRatioX, grabRatioY) {
             var point = root.dragOverlay
               ? spatialPreview.mapFromItem(root.dragOverlay, x, y)
               : ({ x: x, y: y })
             root.windowDragMoved(toplevel, point.x, point.y,
-              grabRatioX, grabRatioY)
+              grabRatioX, grabRatioY, x, y)
           }
           onDragFinished: root.windowDragFinished(previewToplevel)
           onWindowSelected: root.windowSelected(previewToplevel)
@@ -388,6 +421,9 @@ BorderSurface {
     enabled: !root.addWorkspace && (root.validDropTarget
       || (root.draggedFloating && root.draggedSourceWorkspaceId === root.workspaceId))
 
+    onEntered: if (root.validDropTarget)
+      root.windowDragEnteredWorkspace(root.workspaceId)
+
     onDropped: function(drop) {
       var sameWorkspaceFloating = root.draggedFloating
         && root.draggedSourceWorkspaceId === root.workspaceId
@@ -404,7 +440,7 @@ BorderSurface {
 
   HoverHandler {
     id: cardHover
-    onHoveredChanged: if (hovered) root.workspaceHovered()
+    onHoveredChanged: if (hovered && root.selectOnHover) root.workspaceHovered()
   }
 
   // Window previews can reach the card edges in a no-gaps workspace and are
@@ -413,7 +449,7 @@ BorderSurface {
   Rectangle {
     anchors.fill: parent
     z: 100000
-    visible: root.focused
+    visible: root.showBorder && root.focused
     color: "transparent"
     radius: root.radius
     border.color: Color.accent

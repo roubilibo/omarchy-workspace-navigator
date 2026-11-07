@@ -10,14 +10,16 @@ https://github.com/user-attachments/assets/05c1dcf1-332a-4b1e-b2d7-3017d8340ca5
 
 ## Features
 
-- 3×3 workspace grid with horizontal pages.
+- Mission Control overview with a horizontal workspace strip and one large preview of the selected workspace.
+- The strip starts with five workspaces; use `Add workspace` to show more. Workspace previews update live while the overview is open.
 - Live thumbnails showing each window's layout.
 - Left-click a workspace to enter it.
 - Left-click a window thumbnail to focus it.
 - Right-click a workspace for rename, persistence, move, and delete actions.
-- Drag windows between workspaces.
-- Drag floating windows freely within a workspace; tiled previews reflow during drag and reorder when dropped on another tiled window.
-- Create and delete empty workspaces above workspace 8.
+- Drag windows between workspaces while preserving their floating or tiled state. A tiled window leaves the source layout during the drag without changing its floating state, so the remaining tiles can reflow; it returns to tiling when released.
+- Dragging a window from the large preview starts shrinking on pickup, continues as it approaches the strip, and fits the destination thumbnail on entry. Drags between strip thumbnails keep their size.
+- Drop a tiled window on another tiled window in the same workspace to swap their layout positions.
+- Delete empty workspaces added beyond the first five.
 - Alt+Tab switcher with live window previews.
 - Alt+Tab previews preserve each window's original aspect ratio.
 - Alt+Tab cards adapt to the display, with the bottom row holding the larger share up to 10 windows; larger sets wrap into a vertically scrollable grid.
@@ -40,14 +42,14 @@ scrim behind it.
 Each optional behavior is represented by one toggle. Turning a toggle off
 restores its default behavior.
 
-Horizontal two-finger touchpad swipes page through the workspace overview.
+Horizontal two-finger touchpad swipes move through the workspace strip.
 
 ### Mouse behavior
 
 - Click a workspace card to focus it.
 - Click a window thumbnail to focus that window.
 - Drag a floating thumbnail to reposition it, or drag any thumbnail to another workspace to move it.
-- Tiled previews reflow while dragging; drop on another tiled thumbnail in the same workspace to reorder them. Floating/tiled state is restored after the drop.
+- Tiled windows leave the source layout during a drag without becoming floating, then return to tiling when released. Drop one on another tiled thumbnail in the same workspace to swap their layout positions.
 - Right-click a workspace card to open its action menu.
 
 The setting is saved automatically. It can also be opened directly with:

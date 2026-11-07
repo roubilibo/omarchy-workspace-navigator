@@ -26,6 +26,8 @@ Item {
   // window here: focusing it can switch workspaces and warp the cursor.
   property var selectedToplevel: null
   property int contextWorkspaceId: -1
+  property bool draggedFromWorkspaceCanvas: false
+  property real dragShrinkProgress: 0
   property real contextMenuX: 0
   property real contextMenuY: 0
   property bool workspaceContextOpen: false
@@ -36,14 +38,13 @@ Item {
   property int workspaceRevision: 0
   property var draggedToplevel: null
   property var dragGeometryOverrides: ({})
-  // Workspace moves change the toplevel model. Keep the thumbnail Repeater
-  // stable through the overview drag; sibling preview geometry is updated
-  // separately so the dragged delegate and pointer stay attached.
+  property var dragWorkspaceToplevelSnapshots: null
+  property bool dragPreviewFrozen: false
+  // Workspace moves change the toplevel model. Keep the preview delegates
+  // stable through a drag so the active DragHandler stays attached.
   property bool refreshAfterDrag: false
   property var dragStartState: null
   property var pendingFloatingDragMove: null
-  property string pendingTiledRestoreAddress: ""
-  property int pendingTiledRestoreAttempts: 0
   property var pendingWindowDrop: null
   property var pendingTiledSwap: null
   property int pendingWorkspaceCreateId: -1
@@ -52,8 +53,8 @@ Item {
   property int pendingWorkspaceDeleteId: -1
   property var menuPersistentWorkspaceIds: []
   property var createdWorkspaceIds: []
-  property int currentPage: 0
   property var workspaceScroller: null
+  property Item dragOverlayItem: null
   property bool showKeybindHint: false
   property bool settingsMode: false
   property int settingsSelection: 0
@@ -86,17 +87,24 @@ Item {
   }
   onOpenedChanged: {
     root.syncModalInputMode()
-    if (!root.opened) root.closeWorkspaceContext()
+    if (!root.opened) {
+      root.closeWorkspaceContext()
+      // A close key can dismiss the overview while a delegate is being
+      // replaced. Never leave a temporarily detached tiled client in the
+      // private drag workspace if the normal DragHandler finish was skipped.
+      if (root.dragStartState && root.dragStartState.temporarilyDetached
+          && !root.pendingWindowDrop)
+        root.endWindowDrag(root.draggedToplevel)
+    }
   }
 
-  readonly property int minimumWorkspaceCount: 8
+  readonly property int minimumWorkspaceCount: 5
   // Hyprland workspace IDs are signed integers. Keeping the accepted range
   // explicit also means every value interpolated into a dispatcher is a
   // canonical integer, never caller-controlled command text.
   readonly property int maximumWorkspaceId: 2147483647
-  readonly property int overviewColumns: 3
-  readonly property int cardsPerPage: 9
   readonly property int cardGap: Style.space(12)
+  readonly property real workspaceThumbnailWidth: Style.space(180)
   readonly property var settingsOptions: [
     {
       kind: "altTab",
@@ -145,12 +153,24 @@ Item {
       var settings = JSON.parse(String(raw || "{}"))
       if (settings.altTabScope === "all" || settings.altTabScope === "workspace")
         root.altTabScope = settings.altTabScope
+      if (Array.isArray(settings.workspaceIds)) {
+        var workspaceIds = []
+        for (var i = 0; i < settings.workspaceIds.length; i++) {
+          var id = root.positiveWorkspaceId(settings.workspaceIds[i])
+          if (id > root.minimumWorkspaceCount && workspaceIds.indexOf(id) < 0)
+            workspaceIds.push(id)
+        }
+        workspaceIds.sort(function(left, right) { return left - right })
+        root.createdWorkspaceIds = workspaceIds
+        root.workspaceRevision += 1
+      }
     } catch (e) {}
   }
 
   function saveSettings() {
     root.settingsWriteText = JSON.stringify({
-      altTabScope: root.altTabScope
+      altTabScope: root.altTabScope,
+      workspaceIds: root.createdWorkspaceIds
     }, null, 2) + "\n"
     root.settingsWriteDirty = true
     if (!settingsWriteProcess.running) root.startSettingsWrite()
@@ -310,8 +330,8 @@ Item {
     return id
   }
 
-  // Keep exactly eight default workspaces visible. Extra workspaces are shown
-  // only once they exist in Hyprland or have been created through the + card.
+  // Keep five base workspaces visible. Additional workspaces are shown only
+  // after the user adds them through the + card.
   function workspaceIds(revision) {
     var ids = []
     for (var i = 1; i <= root.minimumWorkspaceCount; i++) ids.push(i)
@@ -321,13 +341,6 @@ Item {
       if (createdId > root.minimumWorkspaceCount
           && ids.indexOf(createdId) === -1)
         ids.push(createdId)
-    }
-
-    var values = Hyprland.workspaces.values
-    for (var j = 0; j < values.length; j++) {
-      var id = root.positiveWorkspaceId(values[j].id)
-      if (id > root.minimumWorkspaceCount && ids.indexOf(id) === -1)
-        ids.push(id)
     }
 
     ids.sort(function(left, right) { return left - right })
@@ -343,17 +356,21 @@ Item {
     return entries
   }
 
-  function pageCountFor(entryCount) {
-    return Math.max(1, Math.ceil(Math.max(1, Number(entryCount) || 1) / root.cardsPerPage))
-  }
-
-  function pageForIndex(index) {
-    return Math.floor(Math.max(0, Number(index) || 0) / root.cardsPerPage)
-  }
-
   function ensureSelectionVisible() {
     Qt.callLater(function() {
-      root.scrollToPage(root.pageForIndex(root.selectedIndex))
+      if (!root.workspaceScroller) return
+      var cardWidth = root.workspaceScroller.thumbnailWidth
+      var step = cardWidth + root.cardGap
+      var left = root.workspaceScroller.cardsOffsetX
+        + Math.max(0, root.selectedIndex * step)
+      var right = left + cardWidth
+      var viewLeft = root.workspaceScroller.contentX
+      var viewRight = viewLeft + root.workspaceScroller.width
+      if (left < viewLeft)
+        root.workspaceScroller.contentX = left
+      else if (right > viewRight)
+        root.workspaceScroller.contentX = Math.min(
+          left, root.workspaceScroller.contentWidth - root.workspaceScroller.width)
     })
   }
 
@@ -416,23 +433,6 @@ Item {
     return width / height
   }
 
-  function cardWidthFor(width, height, aspectRatio) {
-    var availableWidth = Math.max(1,
-      (width - (root.overviewColumns - 1) * root.cardGap) / root.overviewColumns)
-    var availableHeight = Math.max(1,
-      (height - (root.overviewColumns - 1) * root.cardGap) / root.overviewColumns)
-    var aspect = isFinite(Number(aspectRatio)) && Number(aspectRatio) > 0
-      ? Number(aspectRatio) : 16 / 9
-    return Math.max(1, Math.floor(Math.min(availableWidth, availableHeight * aspect)))
-  }
-
-  function cardHeightFor(width, height, aspectRatio) {
-    var aspect = isFinite(Number(aspectRatio)) && Number(aspectRatio) > 0
-      ? Number(aspectRatio) : 16 / 9
-    var cardWidth = root.cardWidthFor(width, height, aspect)
-    return Math.max(1, Math.floor(cardWidth / aspect))
-  }
-
   function select(delta) {
     var count = root.workspaceEntries(root.workspaceRevision).length
     if (count <= 0) return
@@ -440,14 +440,37 @@ Item {
     root.ensureSelectionVisible()
   }
 
+  function selectWorkspacePreview(id) {
+    // The selected workspace owns the source WindowPreview in the large
+    // canvas. Replacing it while a drag is over the strip destroys the active
+    // DragHandler before the destination DropArea can finish the gesture.
+    if (root.draggedToplevel) return
+    var entries = root.workspaceEntries(root.workspaceRevision)
+    for (var i = 0; i < entries.length; i++) {
+      if (!entries[i].addWorkspace && Number(entries[i].id) === Number(id)) {
+        root.selectedIndex = i
+        return
+      }
+    }
+  }
+
+  function selectWorkspacePreviewAfterDrop(id) {
+    var workspaceId = root.positiveWorkspaceId(id)
+    if (workspaceId < 1) return
+    Qt.callLater(function() {
+      var entries = root.workspaceEntries(root.workspaceRevision)
+      for (var i = 0; i < entries.length; i++) {
+        if (!entries[i].addWorkspace && Number(entries[i].id) === workspaceId) {
+          root.selectedIndex = i
+          root.ensureSelectionVisible()
+          return
+        }
+      }
+    })
+  }
+
   function selectRow(delta) {
-    var count = root.workspaceEntries(root.workspaceRevision).length
-    if (count <= 0) return
-    var next = root.selectedIndex + delta * root.overviewColumns
-    if (next < 0) next = 0
-    if (next >= count) next = count - 1
-    root.selectedIndex = next
-    root.ensureSelectionVisible()
+    root.select(delta)
   }
 
   function activateSelected() {
@@ -914,14 +937,6 @@ Item {
     root.moveWindowToWorkspace(toplevel, id)
   }
 
-  function scrollToPage(page) {
-    var count = root.pageCountFor(root.workspaceEntries(root.workspaceRevision).length)
-    var targetPage = Math.max(0, Math.min(Number(page) || 0, count - 1))
-    root.currentPage = targetPage
-    if (root.workspaceScroller)
-      root.workspaceScroller.contentX = targetPage * root.workspaceScroller.width
-  }
-
   function addWorkspace() {
     if (workspaceCreateProcess.running) return
     var ids = root.workspaceIds(root.workspaceRevision)
@@ -938,10 +953,11 @@ Item {
     var created = root.createdWorkspaceIds.slice(0)
     if (created.indexOf(id) === -1) created.push(id)
     root.createdWorkspaceIds = created
+    root.saveSettings()
     root.workspaceRevision += 1
 
     try {
-      // Keep the overview open while creating the workspace so the new page
+      // Keep the overview open while creating the workspace so its thumbnail
       // becomes visible immediately. The workspace is not followed here.
       root.dispatchFocusWorkspace(id)
       Hyprland.refreshWorkspaces()
@@ -951,7 +967,8 @@ Item {
     }
 
     Qt.callLater(function() {
-      root.scrollToPage(root.pageCountFor(root.workspaceEntries(root.workspaceRevision).length) - 1)
+      root.selectedIndex = root.workspaceEntries(root.workspaceRevision).length - 1
+      root.ensureSelectionVisible()
     })
   }
 
@@ -961,15 +978,46 @@ Item {
       toplevel.address || (toplevel.lastIpcObject && toplevel.lastIpcObject.address))
   }
 
+  function snapshotWorkspacePreviews() {
+    var snapshots = {}
+    var workspaces = []
+    try { workspaces = Hyprland.workspaces.values } catch (e) {}
+    var activeAddress = Hyprland.activeToplevel
+      ? Hyprland.activeToplevel.address : ""
+    for (var i = 0; i < workspaces.length; i++) {
+      var workspace = workspaces[i]
+      var id = root.positiveWorkspaceId(workspace && workspace.id)
+      if (id < 1 || !workspace.toplevels) continue
+      try {
+        snapshots[String(id)] = WindowModel.resolveWorkspacePreviews(
+          workspace.toplevels.values, activeAddress)
+      }
+      catch (e) { snapshots[String(id)] = [] }
+    }
+    root.dragWorkspaceToplevelSnapshots = snapshots
+  }
+
+  function workspaceToplevelSnapshot(workspaceId) {
+    if (!root.draggedToplevel || !root.dragWorkspaceToplevelSnapshots) return null
+    var id = root.positiveWorkspaceId(workspaceId)
+    return id > 0 && Object.prototype.hasOwnProperty.call(
+      root.dragWorkspaceToplevelSnapshots, String(id))
+      ? root.dragWorkspaceToplevelSnapshots[String(id)] : null
+  }
+
   function selectWindow(toplevel) {
     var address = root.normalizedAddress(toplevel)
     root.selectedToplevel = address !== "" ? toplevel : null
   }
 
-  function beginWindowDrag(toplevel) {
+  function beginWindowDrag(toplevel, fromWorkspaceCanvas) {
     root.refreshAfterDrag = false
-    root.draggedToplevel = toplevel
     root.dragGeometryOverrides = ({})
+    root.draggedFromWorkspaceCanvas = Boolean(fromWorkspaceCanvas)
+    root.dragShrinkProgress = fromWorkspaceCanvas ? 0.28 : 0
+    root.dragPreviewFrozen = false
+    root.draggedToplevel = toplevel
+    root.snapshotWorkspacePreviews()
     var ipc = toplevel && toplevel.lastIpcObject
     var address = root.normalizedAddress(toplevel)
     var workspaceId = toplevel && toplevel.workspace
@@ -979,27 +1027,39 @@ Item {
     root.dragStartState = address && workspaceId > 0
       ? ({ address: address, floating: Boolean(ipc && ipc.floating === true),
            x: x, y: y, hasPosition: isFinite(x) && isFinite(y),
-           workspaceId: workspaceId, temporarilyFloated: false }) : null
+           workspaceId: workspaceId, temporarilyDetached: false,
+           dragWorkspaceName: "" }) : null
 
-    // Hyprland's native tiled drag first detaches the window from the layout.
-    // That makes the remaining tiles reflow while the window is being moved.
-    // The overview moves its thumbnail itself, so mirror only this layout
-    // transition and restore the original tiled state after the drop.
+    // Remove the client from the source layout without toggling its floating
+    // state. The overview proxy follows the pointer while the remaining tiles
+    // reflow; the real client returns from its private workspace on drop.
     if (root.dragStartState && !root.dragStartState.floating
-        && root.setWindowFloating(address, true)) {
-      root.dragStartState.temporarilyFloated = true
-      Qt.callLater(function() {
-        if (root.draggedToplevel === toplevel && root.dragStartState
-            && root.dragStartState.temporarilyFloated
-            && !dragGeometryProbe.running)
-          dragGeometryProbe.running = true
-      })
+        && Hyprland.usingLua) {
+      root.dragStartState.dragWorkspaceName = "workspace-navigator-drag"
+      dragDetachTimer.restart()
     }
+  }
+
+  function detachDraggedTiledWindow() {
+    var state = root.dragStartState
+    if (!state || !root.draggedToplevel || state.floating
+        || state.temporarilyDetached)
+      return
+
+    // Let the drag proxy render at least one frame from the source client,
+    // then freeze that image before hiding the real client off-workspace.
+    root.dragPreviewFrozen = true
+    state.temporarilyDetached = root.dispatchWindowToDragWorkspace(
+      state.address, state.dragWorkspaceName)
+    if (state.temporarilyDetached)
+      dragGeometryProbeDelayTimer.restart()
+    else
+      root.dragPreviewFrozen = false
   }
 
   function updateDragGeometryOverrides(exitCode, output) {
     if (exitCode !== 0 || !root.draggedToplevel || !root.dragStartState
-        || !root.dragStartState.temporarilyFloated)
+        || !root.dragStartState.temporarilyDetached)
       return
 
     var clients = null
@@ -1013,6 +1073,9 @@ Item {
       var at = client && client.at
       var size = client && client.size
       if (!address || !at || at.length < 2 || !size || size.length < 2) continue
+      // Keep the dragged client's preview backed by its source-workspace
+      // snapshot. Its live compositor location is the internal drag workspace.
+      if (address === root.dragStartState.address) continue
       var x = Number(at[0]), y = Number(at[1])
       var width = Number(size[0]), height = Number(size[1])
       if (!isFinite(x) || !isFinite(y) || !isFinite(width) || !isFinite(height)
@@ -1025,22 +1088,54 @@ Item {
     root.dragGeometryOverrides = overrides
   }
 
+  function updateDragShrinkProgress(pointerX, pointerY) {
+    if (!root.draggedFromWorkspaceCanvas || !root.workspaceScroller
+        || !root.dragOverlayItem
+        || !isFinite(Number(pointerX)) || !isFinite(Number(pointerY))) {
+      root.dragShrinkProgress = 0
+      return
+    }
+    // Use the cursor's distance to the whole strip in one coordinate space.
+    // The large preview and the strip use different local origins, so mixing
+    // their local y values makes the thumbnail shrink much too early.
+    var stripTopLeft = root.workspaceScroller.mapToItem(
+      root.dragOverlayItem, 0, 0)
+    var stripRight = stripTopLeft.x + root.workspaceScroller.width
+    var stripBottom = stripTopLeft.y + root.workspaceScroller.height
+    var dx = Math.max(stripTopLeft.x - Number(pointerX), 0,
+      Number(pointerX) - stripRight)
+    var dy = Math.max(stripTopLeft.y - Number(pointerY), 0,
+      Number(pointerY) - stripBottom)
+    var distance = Math.sqrt(dx * dx + dy * dy)
+    var proximity = Math.max(1, Style.space(180))
+    var approach = Math.max(0, Math.min(1, 1 - distance / proximity))
+    approach = approach * approach * (3 - 2 * approach)
+    root.dragShrinkProgress = 0.28 + 0.72 * approach
+  }
+
   function endWindowDrag(toplevel) {
+    dragDetachTimer.stop()
     floatingDragMoveTimer.stop()
     root.pendingFloatingDragMove = null
+    root.dragShrinkProgress = 0
+    root.draggedFromWorkspaceCanvas = false
+    root.dragPreviewFrozen = false
+    var droppedWorkspaceId = root.pendingWindowDrop
+      && root.pendingWindowDrop.address === root.normalizedAddress(toplevel)
+      ? root.pendingWindowDrop.workspaceId : -1
     if (root.draggedToplevel === toplevel && root.dragStartState) {
       var dropPending = root.pendingWindowDrop
         && root.pendingWindowDrop.address === root.dragStartState.address
-      if (!dropPending && root.dragStartState.floating
-          && root.dragStartState.hasPosition)
+      if (root.dragStartState.temporarilyDetached) {
+        // DropArea and DragHandler can finish in either order. Return to the
+        // source workspace only when no drop transaction owns the destination.
+        if (!dropPending)
+          root.dispatchWorkspaceMove(root.dragStartState.address,
+            root.dragStartState.workspaceId)
+      } else if (!dropPending && root.dragStartState.floating
+          && root.dragStartState.hasPosition) {
         root.dispatchWindowPosition(root.dragStartState.address,
           { x: root.dragStartState.x, y: root.dragStartState.y })
-      else if (root.dragStartState.temporarilyFloated) {
-        // A workspace drop issues its first restore while DropArea is handling
-        // the release. Repeat it here after DragHandler has fully ended; the
-        // drag teardown can otherwise leave the compositor window floating.
-        root.setWindowFloating(root.dragStartState.address, false)
-        root.verifyTiledRestore(root.dragStartState.address)
       }
       root.refreshAfterDrag = true
     }
@@ -1051,47 +1146,8 @@ Item {
       root.refreshAfterDrag = false
       dragRefreshTimer.restart()
     }
-  }
-
-  function verifyTiledRestore(address) {
-    if (!address) return
-    root.pendingTiledRestoreAddress = address
-    root.pendingTiledRestoreAttempts = 0
-    if (!tiledRestoreProbe.running) tiledRestoreProbe.running = true
-  }
-
-  function finishTiledRestoreProbe(exitCode, output) {
-    var address = root.pendingTiledRestoreAddress
-    if (!address) return
-    var clients = null
-    try { clients = exitCode === 0 ? JSON.parse(String(output || "")) : null }
-    catch (e) {}
-    var current = null
-    if (Array.isArray(clients)) {
-      for (var i = 0; i < clients.length; i++) {
-        if (root.normalizedAddress(clients[i]) === address) {
-          current = clients[i]
-          break
-        }
-      }
-    }
-
-    if (current && current.floating !== true) {
-      root.pendingTiledRestoreAddress = ""
-      root.pendingTiledRestoreAttempts = 0
-      return
-    }
-
-    root.pendingTiledRestoreAttempts += 1
-    if (root.pendingTiledRestoreAttempts >= 3) {
-      console.warn("workspace overview: tiled state restoration could not be verified",
-        address)
-      root.pendingTiledRestoreAddress = ""
-      root.pendingTiledRestoreAttempts = 0
-      return
-    }
-    if (current) root.setWindowFloating(address, false)
-    tiledRestoreRetryTimer.restart()
+    if (droppedWorkspaceId > 0)
+      root.selectWorkspacePreviewAfterDrop(droppedWorkspaceId)
   }
 
   function moveWindowToWorkspace(toplevel, workspaceId) {
@@ -1112,21 +1168,23 @@ Item {
     return Boolean(ipc && ipc.floating === true)
   }
 
-  function setWindowFloating(address, floating) {
-    if (!address || !Hyprland.usingLua) return false
+  function dispatchWindowToDragWorkspace(address, workspaceName) {
+    if (!address || !workspaceName || !Hyprland.usingLua) return false
     try {
-      Hyprland.dispatch('hl.dsp.window.float({ action = "'
-        + (floating ? "on" : "off") + '", window = "address:' + address + '" })')
+      Hyprland.dispatch('hl.dsp.window.move({ workspace = "special:'
+        + workspaceName + '", window = "address:' + address
+        + '", follow = false })')
       return true
     } catch (e) {
-      console.warn("workspace overview: could not change window floating state",
-        address, floating, e)
+      console.warn("workspace overview: could not detach tiled window from layout",
+        address, workspaceName, e)
       return false
     }
   }
 
   function wasFloatingAtDragStart(toplevel) {
-    return root.draggedToplevel === toplevel && root.dragStartState
+    var address = root.normalizedAddress(toplevel)
+    return root.dragStartState && address === root.dragStartState.address
       ? root.dragStartState.floating : root.isFloatingWindow(toplevel)
   }
 
@@ -1144,8 +1202,15 @@ Item {
   function swapTiledWindows(sourceToplevel, targetToplevel) {
     var sourceAddress = root.normalizedAddress(sourceToplevel)
     var targetAddress = root.normalizedAddress(targetToplevel)
-    var sourceWorkspaceId = sourceToplevel && sourceToplevel.workspace
-      ? root.positiveWorkspaceId(sourceToplevel.workspace.id) : -1
+    // A tiled overview drag temporarily moves the live client to a private
+    // workspace so Hyprland can reflow the remaining layout. Use its recorded
+    // source workspace while validating the drop; the model currently reports
+    // the private workspace until the return dispatch is processed.
+    var sourceWorkspaceId = root.dragStartState
+      && sourceAddress === root.dragStartState.address
+      ? root.dragStartState.workspaceId
+      : (sourceToplevel && sourceToplevel.workspace
+        ? root.positiveWorkspaceId(sourceToplevel.workspace.id) : -1)
     var targetWorkspaceId = targetToplevel && targetToplevel.workspace
       ? root.positiveWorkspaceId(targetToplevel.workspace.id) : -1
     if (!Hyprland.usingLua || !sourceAddress || !targetAddress
@@ -1204,6 +1269,9 @@ Item {
     }
 
     try {
+      // Use the window-scoped dispatcher so Hyprland receives both the
+      // dragged source and the tile under the drop. The global swap dispatcher
+      // acts on the active window, which the overview does not change.
       Hyprland.dispatch("hl.dsp.window.swap({ window = \"address:"
         + swap.sourceAddress + "\", target = \"address:"
         + swap.targetAddress + "\" })")
@@ -1263,13 +1331,29 @@ Item {
 
   function queueFloatingWindowDragMove(toplevel, workspaceId, areaX, areaY,
                                        areaWidth, areaHeight, grabRatioX, grabRatioY) {
-    if (root.draggedToplevel !== toplevel || !root.wasFloatingAtDragStart(toplevel)
+    if (root.draggedToplevel !== toplevel
+        || !root.wasFloatingAtDragStart(toplevel)
         || !root.dragStartState || !root.dragStartState.hasPosition)
       return
     root.pendingFloatingDragMove = {
       toplevel: toplevel, workspaceId: workspaceId, x: areaX, y: areaY,
       width: areaWidth, height: areaHeight,
       grabRatioX: grabRatioX, grabRatioY: grabRatioY
+    }
+    // The compositor's IPC model is intentionally held stable during a drag
+    // so the active DragHandler survives. Feed the same transient position to
+    // every workspace preview so the strip mirrors the large canvas live.
+    if (root.draggedFromWorkspaceCanvas) {
+      var position = root.floatingWindowPosition(toplevel, workspaceId,
+        areaX, areaY, areaWidth, areaHeight, grabRatioX, grabRatioY)
+      var ipc = toplevel.lastIpcObject
+      if (position && ipc) {
+        var previewIpc = Object.assign({}, ipc)
+        previewIpc.at = [position.position.x, position.position.y]
+        var overrides = Object.assign({}, root.dragGeometryOverrides)
+        overrides[position.address] = previewIpc
+        root.dragGeometryOverrides = overrides
+      }
     }
     if (!floatingDragMoveTimer.running) floatingDragMoveTimer.start()
   }
@@ -1322,7 +1406,6 @@ Item {
     try {
       if (state.workspaceId > 0)
         root.dispatchWorkspaceMove(state.address, state.workspaceId)
-      root.setWindowFloating(state.address, state.floating)
       if (state.floating && state.hasPosition)
         root.dispatchWindowPosition(state.address, { x: state.x, y: state.y })
       return true
@@ -1382,14 +1465,15 @@ Item {
     var id = root.positiveWorkspaceId(workspaceId)
     if (!state || state.workspaceId < 1 || id < 1 || root.pendingWindowDrop)
       return false
+    dragDetachTimer.stop()
     if (state.floating && !state.hasPosition) return false
 
-    // Same-workspace tiled drops target a concrete tile, so swap layout slots
-    // while leaving both windows tiled. Drops on floating targets are ignored.
+    // Same-workspace tiled drops target a concrete tile, so return the source
+    // from its private drag workspace before exchanging layout slots.
     if (!state.floating && state.workspaceId === id) {
       if (targetToplevel && !root.isFloatingWindow(targetToplevel)) {
-        if (state.temporarilyFloated)
-          root.setWindowFloating(state.address, false)
+        if (state.temporarilyDetached)
+          root.dispatchWorkspaceMove(state.address, state.workspaceId)
         root.swapTiledWindows(toplevel, targetToplevel)
       }
       return true
@@ -1410,11 +1494,9 @@ Item {
     }
     root.pendingWindowDrop = transaction
     try {
-      if (state.workspaceId !== id)
+      if (state.temporarilyDetached || state.workspaceId !== id)
         root.dispatchWorkspaceMove(state.address, id)
       if (position) root.dispatchWindowPosition(state.address, position)
-      if (state.temporarilyFloated)
-        root.setWindowFloating(state.address, state.floating)
       root.refreshAfterWindowAction(toplevel)
       windowDropVerifyTimer.start()
       return true
@@ -1455,12 +1537,12 @@ Item {
         remaining.push(root.createdWorkspaceIds[i])
     }
     root.createdWorkspaceIds = remaining
+    root.saveSettings()
     try { Hyprland.refreshWorkspaces() } catch (e) {}
     root.workspaceRevision += 1
     Qt.callLater(function() {
       root.clampSelection()
-      root.scrollToPage(Math.min(root.currentPage,
-        root.pageCountFor(root.workspaceEntries(root.workspaceRevision).length) - 1))
+      root.ensureSelectionVisible()
     })
   }
 
@@ -1555,10 +1637,9 @@ Item {
     root.showKeybindHint = false
     root.selectedIndex = root.focusedIndex()
     root.opened = true
-    root.currentPage = root.pageForIndex(root.selectedIndex)
     Qt.callLater(function() {
       root.clampSelection()
-      root.scrollToPage(root.currentPage)
+      root.ensureSelectionVisible()
     })
   }
 
@@ -1667,12 +1748,21 @@ Item {
   }
 
   Timer {
-    id: tiledRestoreRetryTimer
-    interval: 100
+    id: dragDetachTimer
+    interval: 90
+    repeat: false
+    onTriggered: root.detachDraggedTiledWindow()
+  }
+
+  Timer {
+    id: dragGeometryProbeDelayTimer
+    interval: 60
     repeat: false
     onTriggered: {
-      if (!tiledRestoreProbe.running && root.pendingTiledRestoreAddress !== "")
-        tiledRestoreProbe.running = true
+      if (root.draggedToplevel && root.dragStartState
+          && root.dragStartState.temporarilyDetached
+          && !dragGeometryProbe.running)
+        dragGeometryProbe.running = true
     }
   }
 
@@ -1689,8 +1779,11 @@ Item {
     repeat: false
     onTriggered: {
       try { Hyprland.refreshToplevels() } catch (e) {}
-      root.dragGeometryOverrides = ({})
       root.workspaceRevision += 1
+      Qt.callLater(function() {
+        root.dragGeometryOverrides = ({})
+        root.dragWorkspaceToplevelSnapshots = null
+      })
     }
   }
 
@@ -1703,15 +1796,6 @@ Item {
     }
     onExited: function(exitCode) {
       root.updateDragGeometryOverrides(exitCode, dragGeometryProbeOutput.text)
-    }
-  }
-
-  Process {
-    id: tiledRestoreProbe
-    command: ["hyprctl", "clients", "-j"]
-    stdout: StdioCollector { id: tiledRestoreProbeOutput; waitForEnd: true }
-    onExited: function(exitCode) {
-      root.finishTiledRestoreProbe(exitCode, tiledRestoreProbeOutput.text)
     }
   }
 
@@ -2126,9 +2210,7 @@ Item {
 
             Text {
               Layout.fillWidth: true
-              text: root.pageCountFor(root.workspaceEntries(root.workspaceRevision).length) > 1
-                ? "Swipe horizontally for additional workspaces  •  Click a card to enter"
-                : "Click a card to enter  •  Click a thumbnail to focus  •  Right-click for actions"
+              text: "Select a workspace to preview it  •  Click a window to open it"
               color: Util.alpha(Color.menu.text, 0.65)
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
@@ -2150,7 +2232,7 @@ Item {
                 anchors.fill: parent
                 anchors.leftMargin: Style.space(14)
                 anchors.rightMargin: Style.space(14)
-                text: "Overview: ←/→ or H/L navigate  •  ↑/↓ or K/J move rows  •  Tab/Shift+Tab select  •  Enter/Space activate  •  Esc close  •  ?: hints\nSUPER+TAB: toggle overview  •  ALT+TAB: next window  •  ALT+SHIFT+TAB: previous  •  release ALT: focus selected"
+                text: "Overview: ←/→ or H/L navigate workspaces  •  ↑/↓ or K/J select workspaces  •  Tab/Shift+Tab select  •  Enter/Space open workspace  •  Esc close  •  ?: hints\nSUPER+TAB: toggle overview  •  ALT+TAB: next window  •  ALT+SHIFT+TAB: previous  •  release ALT: focus selected"
                 color: Util.alpha(Color.menu.text, 0.82)
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
@@ -2163,25 +2245,36 @@ Item {
 
             Flickable {
               id: workspaceFlickable
-              property real swipeStartX: 0
-              property int swipeStartPage: 0
+              readonly property real thumbnailWidth: root.workspaceThumbnailWidth
+              readonly property real thumbnailHeight: thumbnailWidth
+                / root.cardAspectRatioFor(panelScreen)
+              readonly property real cardsContentWidth: Math.max(0,
+                root.workspaceEntries(root.workspaceRevision).length
+                  * (thumbnailWidth + root.cardGap) - root.cardGap)
+              readonly property real cardsOffsetX: Math.max(0,
+                (width - cardsContentWidth) / 2)
               property real horizontalWheelAccumulator: 0
               Component.onCompleted: root.workspaceScroller = workspaceFlickable
               Layout.fillWidth: true
-              Layout.fillHeight: true
+              Layout.preferredHeight: thumbnailHeight
               clip: true
-              contentWidth: width * root.pageCountFor(
-                root.workspaceEntries(root.workspaceRevision).length)
+              contentWidth: Math.max(width, cardsContentWidth)
               contentHeight: height
-              interactive: root.pageCountFor(
-                root.workspaceEntries(root.workspaceRevision).length) > 1
+              interactive: contentWidth > width
               flickableDirection: Flickable.HorizontalFlick
               boundsBehavior: Flickable.StopAtBounds
+              maximumFlickVelocity: 8000
+              flickDeceleration: 5000
+              onMovementEnded: {
+                var step = thumbnailWidth + root.cardGap
+                if (step <= 0) return
+                var entries = root.workspaceEntries(root.workspaceRevision)
+                if (entries.length <= 0) return
+                root.selectedIndex = Math.max(0, Math.min(entries.length - 1,
+                  Math.round(contentX / step)))
+                root.ensureSelectionVisible()
+              }
 
-              // Wayland touchpads expose a two-finger horizontal swipe as
-              // wheel/axis events rather than as a single-pointer drag.
-              // Flickable does not page on those events by itself, so bridge
-              // the horizontal delta to the same page snap used by dragging.
               function handleHorizontalWheel(event) {
                 var angle = event.angleDelta
                 var pixel = event.pixelDelta
@@ -2196,24 +2289,16 @@ Item {
                     || Math.abs(horizontalX) <= Math.abs(horizontalY))
                   return
 
-                var delta = pixelX !== 0 ? pixelX : angleX
-                horizontalWheelAccumulator += delta
-
+                horizontalWheelAccumulator += pixelX !== 0 ? pixelX : angleX
                 var threshold = pixelX !== 0 ? 48 : 120
                 if (Math.abs(horizontalWheelAccumulator) < threshold)
                   return
-
-                // Qt's horizontal wheel delta describes content scrolling,
-                // which is opposite to the physical finger direction. Match
-                // Flickable's direct-drag behavior: swipe left advances pages.
                 var direction = horizontalWheelAccumulator > 0 ? -1 : 1
                 horizontalWheelAccumulator = 0
-                root.scrollToPage(root.currentPage + direction)
+                root.select(direction)
                 event.accepted = true
               }
 
-              // MouseArea.onWheel is the reliable path for libinput axis
-              // events in Quickshell, including two-finger touchpad swipes.
               MouseArea {
                 anchors.fill: parent
                 z: 100
@@ -2223,172 +2308,184 @@ Item {
                 }
               }
 
-              // Make page swipes feel snappier by increasing the travel speed
-              // and letting the flick settle sooner.
-              maximumFlickVelocity: 8000
-              flickDeceleration: 5000
-              onMovementStarted: {
-                horizontalWheelAccumulator = 0
-                swipeStartX = contentX
-                swipeStartPage = root.currentPage
-              }
-              onMovementEnded: {
-                if (width <= 0) return
-                var delta = contentX - swipeStartX
-                var threshold = width * 0.50
-                var targetPage = swipeStartPage
-                if (Math.abs(delta) >= threshold) {
-                  targetPage += delta > 0 ? 1 : -1
-                } else {
-                  targetPage = Math.round(contentX / width)
-                }
-                root.scrollToPage(targetPage)
-              }
-              onContentXChanged: {
-                if (width > 0 && (dragging || flicking)) {
-                  // Preserve native flick motion, but keep it within one
-                  // adjacent-page interval.
-                  var startX = swipeStartPage * width
-                  var lowerBound = Math.max(0, startX - width)
-                  var upperBound = Math.min(contentWidth - width, startX + width)
-                  if (contentX < lowerBound) contentX = lowerBound
-                  else if (contentX > upperBound) contentX = upperBound
-                }
-                if (width > 0)
-                  root.currentPage = Math.round(contentX / width)
-              }
+              Repeater {
+                model: root.workspaceEntries(root.workspaceRevision)
 
-              Behavior on contentX {
-                // Animate only the final page snap, not pointer tracking.
-                enabled: !workspaceFlickable.dragging
-                  && !workspaceFlickable.flicking
-                NumberAnimation {
-                  duration: 180
-                  easing.type: Easing.OutCubic
-                }
-              }
-
-              Row {
-                id: workspacePages
-                width: workspaceFlickable.contentWidth
-                height: workspaceFlickable.height
-
-                Repeater {
-                  model: root.pageCountFor(
-                    root.workspaceEntries(root.workspaceRevision).length)
-
-                  delegate: Item {
-                    id: pageItem
-                    required property int modelData
-                    readonly property int pageNumber: modelData
-                    readonly property var pageEntries: root.workspaceEntries(
-                      root.workspaceRevision).slice(
-                        modelData * root.cardsPerPage,
-                        (modelData + 1) * root.cardsPerPage)
-
-                    width: workspaceFlickable.width
-                    height: workspaceFlickable.height
-
-                    Item {
-                      readonly property real cardAspectRatio: root.cardAspectRatioFor(panelScreen)
-                      readonly property int cardWidth: root.cardWidthFor(
-                        workspaceFlickable.width, workspaceFlickable.height, cardAspectRatio)
-                      readonly property int cardHeight: root.cardHeightFor(
-                        workspaceFlickable.width, workspaceFlickable.height, cardAspectRatio)
-                      anchors.centerIn: parent
-                      width: cardWidth * root.overviewColumns
-                        + root.cardGap * (root.overviewColumns - 1)
-                      height: cardHeight * root.overviewColumns
-                        + root.cardGap * (root.overviewColumns - 1)
-                      Repeater {
-                        model: pageEntries
-
-                        delegate: WorkspaceCard {
-                          required property var modelData
-                          required property int index
-
-                          readonly property bool addCard: Boolean(modelData.addWorkspace)
-                          readonly property int cardWorkspaceId: Number(modelData.id)
-                          readonly property int absoluteIndex: pageItem.pageNumber
-                            * root.cardsPerPage + index
-
-                          width: parent.cardWidth
-                          height: parent.cardHeight
-                          // Use fixed slots instead of GridLayout's implicit
-                          // column sizing, which moved the add card when a
-                          // page was only partially filled.
-                          x: (index % root.overviewColumns)
-                            * (parent.cardWidth + root.cardGap)
-                          y: Math.floor(index / root.overviewColumns)
-                            * (parent.cardHeight + root.cardGap)
-                          workspaceId: addCard ? 0 : cardWorkspaceId
-                          addWorkspace: addCard
-                          deletable: !addCard && cardWorkspaceId > root.minimumWorkspaceCount
-                          workspace: addCard ? null
-                            : root.workspaceById(cardWorkspaceId, root.workspaceRevision)
-                          workspaceName: addCard ? "" : root.workspaceName(
-                            root.workspaceById(cardWorkspaceId, root.workspaceRevision),
-                            cardWorkspaceId)
-                          previewScreen: panelScreen
-                          contextTarget: keyCatcher
-                          focused: !addCard && Hyprland.focusedWorkspace !== null
-                            && Hyprland.focusedWorkspace.id === cardWorkspaceId
-                          keyboardSelected: root.selectedIndex === absoluteIndex
-                          draggedToplevel: root.draggedToplevel
-                          geometryOverrides: root.dragGeometryOverrides
-                          selectedToplevel: root.selectedToplevel
-                          dragOverlay: dragPreviewOverlay
-                          livePreviews: root.opened && panelWindow.visible
-                          toplevelRevision: root.workspaceRevision
-                          onWorkspaceHovered: root.selectedIndex = absoluteIndex
-                          onWorkspaceActivated: {
-                            if (addCard) root.addWorkspace()
-                            else root.focusWorkspace(cardWorkspaceId)
-                          }
-                          onWorkspaceContextRequested: function(x, y) {
-                            root.openWorkspaceContext(cardWorkspaceId, x, y)
-                          }
-                          onAddWorkspaceRequested: root.addWorkspace()
-                          onWorkspaceDeleteRequested: root.deleteWorkspace(cardWorkspaceId)
-                          onWindowDragStarted: function(toplevel) {
-                            root.selectWindow(toplevel)
-                            root.beginWindowDrag(toplevel)
-                          }
-                          onWindowDragMoved: function(toplevel, x, y,
-                                                      grabRatioX, grabRatioY) {
-                            root.queueFloatingWindowDragMove(toplevel,
-                              cardWorkspaceId, x, y, width, height,
-                              grabRatioX, grabRatioY)
-                          }
-                          onWindowDragFinished: function(toplevel) { root.endWindowDrag(toplevel) }
-                          onWindowSelected: function(toplevel) { root.selectWindow(toplevel) }
-                          onWindowActivated: function(toplevel) { root.focusToplevel(toplevel) }
-                          onWindowDropped: function(toplevel, x, y, grabRatioX, grabRatioY) {
-                            root.dropWindowOnWorkspace(toplevel, cardWorkspaceId,
-                              x, y, grabRatioX, grabRatioY, width, height)
-                          }
-                          onWindowDroppedOn: function(sourceToplevel, targetToplevel,
-                                                      x, y, grabRatioX, grabRatioY) {
-                            root.dropWindowOnWorkspace(sourceToplevel,
-                              cardWorkspaceId, x, y, grabRatioX, grabRatioY,
-                              width, height, targetToplevel)
-                          }
-                        }
-                      }
+                delegate: WorkspaceCard {
+                  required property var modelData
+                  required property int index
+                  readonly property bool addCard: Boolean(modelData.addWorkspace)
+                  readonly property int cardWorkspaceId: Number(modelData.id)
+                  x: workspaceFlickable.cardsOffsetX
+                    + index * (workspaceFlickable.thumbnailWidth + root.cardGap)
+                  y: 0
+                  width: workspaceFlickable.thumbnailWidth
+                  height: workspaceFlickable.height
+                  workspaceId: addCard ? 0 : cardWorkspaceId
+                  addWorkspace: addCard
+                  deletable: !addCard && cardWorkspaceId > root.minimumWorkspaceCount
+                  activateOnClick: false
+                  selectOnHover: true
+                  workspace: addCard ? null
+                    : root.workspaceById(cardWorkspaceId, root.workspaceRevision)
+                  workspaceName: addCard ? "" : root.workspaceName(
+                    root.workspaceById(cardWorkspaceId, root.workspaceRevision),
+                    cardWorkspaceId)
+                  previewScreen: panelScreen
+                  contextTarget: keyCatcher
+                  focused: !addCard && Hyprland.focusedWorkspace !== null
+                    && Hyprland.focusedWorkspace.id === cardWorkspaceId
+                  keyboardSelected: root.selectedIndex === index
+                  draggedToplevel: root.draggedToplevel
+                  freezeDraggedPreview: root.dragPreviewFrozen
+                  draggedSourceWorkspaceIdOverride: root.dragStartState
+                    ? root.dragStartState.workspaceId : -1
+                  toplevelsOverride: root.workspaceToplevelSnapshot(cardWorkspaceId)
+                  geometryOverrides: root.dragGeometryOverrides
+                  selectedToplevel: root.selectedToplevel
+                  dragOverlay: dragPreviewOverlay
+                  draggedFromWorkspaceCanvas: root.draggedFromWorkspaceCanvas
+                  dragShrinkProgress: root.dragShrinkProgress
+                  dragTargetWidth: root.workspaceThumbnailWidth
+                  dragTargetHeight: workspaceFlickable.thumbnailHeight
+                  livePreviews: root.opened && panelWindow.visible
+                  liveCaptureAll: true
+                  toplevelRevision: root.workspaceRevision
+                  onWorkspaceHovered: root.selectWorkspacePreview(cardWorkspaceId)
+                  onWorkspaceActivated: {
+                    if (addCard) root.addWorkspace()
+                    else root.selectedIndex = index
+                  }
+                  onWorkspaceContextRequested: function(x, y) {
+                    root.openWorkspaceContext(cardWorkspaceId, x, y)
+                  }
+                  onAddWorkspaceRequested: root.addWorkspace()
+                  onWorkspaceDeleteRequested: root.deleteWorkspace(cardWorkspaceId)
+                  onWindowDragStarted: function(toplevel) {
+                    root.selectWindow(toplevel)
+                    root.beginWindowDrag(toplevel, false)
+                  }
+                  onWindowDragMoved: function(toplevel, x, y,
+                                              grabRatioX, grabRatioY) {
+                    root.queueFloatingWindowDragMove(toplevel,
+                      cardWorkspaceId, x, y, width, height,
+                      grabRatioX, grabRatioY)
+                  }
+                  onWindowDragFinished: function(toplevel) { root.endWindowDrag(toplevel) }
+                  onWindowDragEnteredWorkspace: function(workspaceId) {
+                    if (root.draggedFromWorkspaceCanvas) {
+                      root.dragShrinkProgress = 1
                     }
                   }
+                  onWindowSelected: function(toplevel) { root.selectWindow(toplevel) }
+                  onWindowActivated: function(toplevel) { root.focusToplevel(toplevel) }
+                  onWindowDropped: function(toplevel, x, y, grabRatioX, grabRatioY) {
+                    root.dropWindowOnWorkspace(toplevel, cardWorkspaceId,
+                      x, y, grabRatioX, grabRatioY, width, height)
+                  }
+                  onWindowDroppedOn: function(sourceToplevel, targetToplevel,
+                                              x, y, grabRatioX, grabRatioY) {
+                    root.dropWindowOnWorkspace(sourceToplevel,
+                      cardWorkspaceId, x, y, grabRatioX, grabRatioY,
+                      width, height, targetToplevel)
+                  }
+                }
+              }
+            }
+
+            Item {
+              id: selectedWorkspaceArea
+              Layout.fillWidth: true
+              Layout.fillHeight: true
+              readonly property var entries: root.workspaceEntries(root.workspaceRevision)
+              readonly property var selectedEntry: entries.length > 0
+                ? entries[Math.max(0, Math.min(root.selectedIndex, entries.length - 1))]
+                : ({ addWorkspace: true, id: 0 })
+              readonly property bool addCard: Boolean(selectedEntry.addWorkspace)
+              readonly property int cardWorkspaceId: Number(selectedEntry.id)
+
+              WorkspaceCard {
+                anchors.fill: parent
+                showBorder: false
+                showBackground: false
+                showSelectionFill: false
+                workspaceId: selectedWorkspaceArea.addCard ? 0
+                  : selectedWorkspaceArea.cardWorkspaceId
+                addWorkspace: selectedWorkspaceArea.addCard
+                deletable: !selectedWorkspaceArea.addCard
+                  && selectedWorkspaceArea.cardWorkspaceId > root.minimumWorkspaceCount
+                workspace: selectedWorkspaceArea.addCard ? null
+                  : root.workspaceById(selectedWorkspaceArea.cardWorkspaceId,
+                    root.workspaceRevision)
+                workspaceName: selectedWorkspaceArea.addCard ? ""
+                  : root.workspaceName(
+                    root.workspaceById(selectedWorkspaceArea.cardWorkspaceId,
+                      root.workspaceRevision), selectedWorkspaceArea.cardWorkspaceId)
+                previewScreen: panelScreen
+                contextTarget: keyCatcher
+                focused: !selectedWorkspaceArea.addCard
+                  && Hyprland.focusedWorkspace !== null
+                  && Hyprland.focusedWorkspace.id === selectedWorkspaceArea.cardWorkspaceId
+                keyboardSelected: true
+                draggedToplevel: root.draggedToplevel
+                freezeDraggedPreview: root.dragPreviewFrozen
+                draggedSourceWorkspaceIdOverride: root.dragStartState
+                  ? root.dragStartState.workspaceId : -1
+                toplevelsOverride: root.workspaceToplevelSnapshot(
+                  selectedWorkspaceArea.cardWorkspaceId)
+                geometryOverrides: root.dragGeometryOverrides
+                selectedToplevel: root.selectedToplevel
+                dragOverlay: dragPreviewOverlay
+                draggedFromWorkspaceCanvas: root.draggedFromWorkspaceCanvas
+                dragShrinkProgress: root.dragShrinkProgress
+                dragTargetWidth: root.workspaceThumbnailWidth
+                dragTargetHeight: workspaceFlickable.thumbnailHeight
+                livePreviews: root.opened && panelWindow.visible
+                toplevelRevision: root.workspaceRevision
+                onWorkspaceHovered: {}
+                onWorkspaceActivated: {
+                  if (selectedWorkspaceArea.addCard) root.addWorkspace()
+                  else root.focusWorkspace(selectedWorkspaceArea.cardWorkspaceId)
+                }
+                onWorkspaceContextRequested: function(x, y) {
+                  root.openWorkspaceContext(selectedWorkspaceArea.cardWorkspaceId, x, y)
+                }
+                onAddWorkspaceRequested: root.addWorkspace()
+                onWorkspaceDeleteRequested: root.deleteWorkspace(
+                  selectedWorkspaceArea.cardWorkspaceId)
+                onWindowDragStarted: function(toplevel) {
+                  root.selectWindow(toplevel)
+                  root.beginWindowDrag(toplevel, true)
+                }
+                onWindowDragMoved: function(toplevel, x, y,
+                                            grabRatioX, grabRatioY,
+                                            pointerX, pointerY) {
+                  root.queueFloatingWindowDragMove(toplevel,
+                    selectedWorkspaceArea.cardWorkspaceId, x, y,
+                    width, height, grabRatioX, grabRatioY)
+                  root.updateDragShrinkProgress(pointerX, pointerY)
+                }
+                onWindowDragFinished: function(toplevel) { root.endWindowDrag(toplevel) }
+                onWindowSelected: function(toplevel) { root.selectWindow(toplevel) }
+                onWindowActivated: function(toplevel) { root.focusToplevel(toplevel) }
+                onWindowDropped: function(toplevel, x, y, grabRatioX, grabRatioY) {
+                  root.dropWindowOnWorkspace(toplevel,
+                    selectedWorkspaceArea.cardWorkspaceId,
+                    x, y, grabRatioX, grabRatioY, width, height)
+                }
+                onWindowDroppedOn: function(sourceToplevel, targetToplevel,
+                                            x, y, grabRatioX, grabRatioY) {
+                  root.dropWindowOnWorkspace(sourceToplevel,
+                    selectedWorkspaceArea.cardWorkspaceId,
+                    x, y, grabRatioX, grabRatioY,
+                    width, height, targetToplevel)
                 }
               }
             }
 
             Text {
               Layout.fillWidth: true
-              text: root.pageCountFor(root.workspaceEntries(root.workspaceRevision).length) > 1
-                ? "Swipe left for next page    •    page "
-                  + String(root.currentPage + 1) + "/"
-                  + String(root.pageCountFor(root.workspaceEntries(root.workspaceRevision).length))
-                  + "    •    swipe right for previous page    •    ?: show/hide shortcuts"
-                : "Click card: enter    Click thumbnail: focus    Drag: move between workspaces; tiled windows swap on tiled drop; floating windows reposition    Right-click: actions    ?: shortcuts"
+              text: "Click a window to open it  •  Drag a window to another workspace  •  Right-click for actions  •  ?: shortcuts"
               color: Util.alpha(Color.menu.text, 0.58)
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
@@ -2722,6 +2819,11 @@ Item {
           id: dragPreviewOverlay
           anchors.fill: parent
           z: 1000000
+          Component.onCompleted: root.dragOverlayItem = dragPreviewOverlay
+          Component.onDestruction: {
+            if (root.dragOverlayItem === dragPreviewOverlay)
+              root.dragOverlayItem = null
+          }
         }
       }
     }
