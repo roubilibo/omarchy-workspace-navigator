@@ -25,7 +25,6 @@ BorderSurface {
   property bool selectOnHover: true
   property var draggedToplevel: null
   property bool freezeDraggedPreview: false
-  property bool centerDraggedPreview: false
   property var geometryOverrides: ({})
   property int geometryRevision: 0
   property Item dragOverlay: null
@@ -301,8 +300,6 @@ BorderSurface {
           workspaceFocused: root.focused
           draggedToplevel: root.draggedToplevel
           draggedSourceWorkspaceIdOverride: root.draggedSourceWorkspaceId
-          centerDraggedPreview: root.centerDraggedPreview
-            && root.isSameToplevel(root.draggedToplevel, previewToplevel)
           freezeDraggedPreview: root.freezeDraggedPreview
           selectedToplevel: root.selectedToplevel
           onDragStarted: function(toplevel, x, y) {

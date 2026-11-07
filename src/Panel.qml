@@ -2734,11 +2734,6 @@ Item {
                   keyboardSelected: root.selectedIndex === index
                   draggedToplevel: root.draggedToplevel
                   freezeDraggedPreview: root.dragPreviewFrozen
-                  centerDraggedPreview: {
-                    var revision = root.dragGeometryRevision
-                    return revision >= 0 && Boolean(root.dragStartState
-                      && root.dragStartState.temporarilyFloated)
-                  }
                   draggedSourceWorkspaceIdOverride: root.dragStartState
                     ? root.dragStartState.workspaceId : -1
                   toplevelsOverride: root.workspaceToplevelSnapshot(cardWorkspaceId)
@@ -2839,11 +2834,6 @@ Item {
                 keyboardSelected: true
                 draggedToplevel: root.draggedToplevel
                 freezeDraggedPreview: root.dragPreviewFrozen
-                centerDraggedPreview: {
-                  var revision = root.dragGeometryRevision
-                  return revision >= 0 && Boolean(root.dragStartState
-                    && root.dragStartState.temporarilyFloated)
-                }
                 draggedSourceWorkspaceIdOverride: root.dragStartState
                   ? root.dragStartState.workspaceId : -1
                 toplevelsOverride: root.workspaceToplevelSnapshot(

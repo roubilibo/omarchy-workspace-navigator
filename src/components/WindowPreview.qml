@@ -16,7 +16,6 @@ Rectangle {
   property var draggedToplevel: null
   property int draggedSourceWorkspaceIdOverride: -1
   property bool freezeDraggedPreview: false
-  property bool centerDraggedPreview: false
   property Item homeParent: null
   property Item dragOverlay: null
   property real dragShrinkProgress: 0
@@ -57,10 +56,9 @@ Rectangle {
     ? root.dragLastTranslationX : 0
   readonly property real dragTranslationY: root.dragging
     ? root.dragLastTranslationY : 0
-  readonly property real visualGrabRatioX: root.centerDraggedPreview
-    ? 0.5 : root.dragGrabRatioX
-  readonly property real visualGrabRatioY: root.centerDraggedPreview
-    ? 0.5 : root.dragGrabRatioY
+  // Keep the point picked up by the pointer fixed while the preview scales.
+  readonly property real visualGrabRatioX: root.dragGrabRatioX
+  readonly property real visualGrabRatioY: root.dragGrabRatioY
   readonly property bool selected: root.selectedToplevel !== null
     && root.isSameToplevel(root.selectedToplevel, root.toplevel)
   readonly property string appId: root.appIdFor(toplevel)
