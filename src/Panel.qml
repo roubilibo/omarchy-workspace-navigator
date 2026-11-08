@@ -344,11 +344,27 @@ Item {
     return id
   }
 
-  // Keep five base workspaces visible. Additional workspaces are shown only
-  // after the user adds them through the + card.
+  // Keep five base workspaces visible. Also include extra workspaces known to
+  // Hyprland while active or occupied; settings preserve intentionally empty
+  // workspaces created through the + card.
   function workspaceIds(revision) {
     var ids = []
     for (var i = 1; i <= root.minimumWorkspaceCount; i++) ids.push(i)
+
+    var workspaces = []
+    try { workspaces = Hyprland.workspaces.values } catch (e) {}
+    for (var workspaceIndex = 0; workspaceIndex < workspaces.length; workspaceIndex++) {
+      var workspace = workspaces[workspaceIndex]
+      var liveId = root.positiveWorkspaceId(workspace && workspace.id)
+      if (liveId <= root.minimumWorkspaceCount || ids.indexOf(liveId) !== -1)
+        continue
+      var occupied = false
+      try {
+        occupied = Boolean(workspace.toplevels
+          && workspace.toplevels.values.length > 0)
+      } catch (e) {}
+      if (workspace.active || occupied) ids.push(liveId)
+    }
 
     for (var createdIndex = 0; createdIndex < root.createdWorkspaceIds.length; createdIndex++) {
       var createdId = root.positiveWorkspaceId(root.createdWorkspaceIds[createdIndex])
