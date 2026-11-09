@@ -9,19 +9,21 @@ import qs.Ui
 import "components"
 import "lib/WindowModel.js" as WindowModel
 import "lib/WindowGeometry.js" as WindowGeometry
+import "lib/WorkspaceModel.js" as WorkspaceModel
 
 // Omarchy Shell workspace overview.
 //
-// This intentionally owns only the overview UI. Workspace state comes from
-// Quickshell.Hyprland, so the ordering is rebuilt from numeric workspace IDs
-// instead of relying on Hyprland's event/list order.
+// Workspace state comes from Quickshell.Hyprland and Omarchy's monitor-to-block
+// map, so each overview presents the focused monitor's local workspace slots.
 Item {
   id: root
 
   property var shell: null
   property var manifest: null
   property bool opened: false
-  property int selectedIndex: 0
+  property int selectedWorkspaceId: -1
+  property bool selectedAddWorkspace: false
+  readonly property int selectedIndex: root.selectionIndex()
   // A drag can preview another workspace without replacing the selected
   // canvas that owns the active WindowPreview DragHandler.
   property int dragPreviewWorkspaceId: -1
@@ -39,6 +41,7 @@ Item {
   // Bumped after Hyprland events so the workspace/client summaries are
   // rebuilt while the panel is open.
   property int workspaceRevision: 0
+  property var workspaceBlocks: ({})
   // Set true temporarily while diagnosing overview drag/drop behavior.
   property bool debugDrag:false
   property var dragLogTimes: ({})
@@ -59,6 +62,7 @@ Item {
   property var pendingWindowDrop: null
   property var pendingTiledSwap: null
   property int pendingWorkspaceCreateId: -1
+  property string pendingWorkspaceCreateMonitorName: ""
   property int pendingWorkspacePersistId: -1
   property int pendingWorkspaceUnpersistId: -1
   property int pendingWorkspaceDeleteId: -1
@@ -108,11 +112,20 @@ Item {
         root.endWindowDrag(root.draggedToplevel)
     }
   }
+  onWorkspaceRevisionChanged: Qt.callLater(root.reconcileSelection)
+  onOverviewMonitorNameChanged: {
+    if (root.opened) {
+      root.selectedWorkspaceId = root.activeWorkspaceId()
+      root.selectedAddWorkspace = false
+    }
+    Qt.callLater(root.reconcileSelection)
+  }
   onDebugDragChanged: {
     if (root.debugDrag && root.draggedToplevel) dragStateProbeTimer.start()
   }
 
   readonly property int minimumWorkspaceCount: 5
+  readonly property int workspacesPerMonitor: 10
   // Hyprland workspace IDs are signed integers. Keeping the accepted range
   // explicit also means every value interpolated into a dispatcher is a
   // canonical integer, never caller-controlled command text.
@@ -128,6 +141,14 @@ Item {
   ]
   readonly property string settingsPath:
     Quickshell.env("HOME") + "/.local/state/omarchy/settings/workspace-navigator.json"
+  readonly property string monitorWorkspaceMapPath:
+    (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state")
+    + "/omarchy/monitor-workspaces"
+  readonly property var overviewMonitor: Hyprland.focusedMonitor
+  readonly property string overviewMonitorName:
+    root.overviewMonitor ? String(root.overviewMonitor.name || "") : ""
+  readonly property int overviewWorkspaceBlock:
+    root.workspaceBlockForMonitor(root.overviewMonitorName)
   readonly property string safeConfigFileHelper:
     Quickshell.env("HOME")
     + "/.config/omarchy/plugins/roubilibo.workspace-navigator/bin/safe-config-file.py"
@@ -171,7 +192,7 @@ Item {
         var workspaceIds = []
         for (var i = 0; i < settings.workspaceIds.length; i++) {
           var id = root.positiveWorkspaceId(settings.workspaceIds[i])
-          if (id > root.minimumWorkspaceCount && workspaceIds.indexOf(id) < 0)
+          if (id > 0 && workspaceIds.indexOf(id) < 0)
             workspaceIds.push(id)
         }
         workspaceIds.sort(function(left, right) { return left - right })
@@ -344,45 +365,100 @@ Item {
     return id
   }
 
-  // Keep five base workspaces visible. Also include extra workspaces known to
-  // Hyprland while active or occupied; settings preserve intentionally empty
-  // workspaces created through the + card.
-  function workspaceIds(revision) {
-    var ids = []
-    for (var i = 1; i <= root.minimumWorkspaceCount; i++) ids.push(i)
+  function readMonitorWorkspaceBlocks(raw) {
+    root.workspaceBlocks = WorkspaceModel.parseMonitorBlocks(raw)
+    root.workspaceRevision += 1
+  }
 
+  function monitorByName(name) {
+    if (!name) return null
+    if (root.overviewMonitor && root.overviewMonitor.name === name)
+      return root.overviewMonitor
+    var monitors = []
+    try { monitors = Hyprland.monitors.values } catch (e) {}
+    for (var i = 0; i < monitors.length; i++) {
+      if (monitors[i] && monitors[i].name === name) return monitors[i]
+    }
+    return null
+  }
+
+  function activeWorkspaceIdForMonitor(name) {
+    var monitor = root.monitorByName(name)
+    return monitor && monitor.activeWorkspace
+      ? root.positiveWorkspaceId(monitor.activeWorkspace.id) : -1
+  }
+
+  function workspaceBlockForMonitor(name) {
+    if (name && root.workspaceBlocks[name] !== undefined) {
+      var mappedBlock = Number(root.workspaceBlocks[name])
+      if (isFinite(mappedBlock) && Math.floor(mappedBlock) === mappedBlock
+          && mappedBlock >= 0)
+        return mappedBlock
+    }
+    var activeId = root.activeWorkspaceIdForMonitor(name)
+    return WorkspaceModel.blockOf(activeId, root.workspacesPerMonitor) >= 0
+      ? WorkspaceModel.blockOf(activeId, root.workspacesPerMonitor) : 0
+  }
+
+  function activeWorkspaceId() {
+    return root.activeWorkspaceIdForMonitor(root.overviewMonitorName)
+  }
+
+  function workspaceLabel(id) {
+    var slot = WorkspaceModel.slotOf(id, root.workspacesPerMonitor)
+    return slot === root.workspacesPerMonitor ? "0" : String(slot)
+  }
+
+  function isWorkspaceDeletable(id) {
+    return WorkspaceModel.isDeletable(id, root.overviewWorkspaceBlock,
+      root.minimumWorkspaceCount, root.workspacesPerMonitor)
+  }
+
+  function isWorkspaceActive(id) {
+    var workspace = root.workspaceById(id, root.workspaceRevision)
+    if (workspace && workspace.active) return true
+    var focused = Hyprland.focusedWorkspace
+    if (focused && root.positiveWorkspaceId(focused.id) === id) return true
+    var monitors = []
+    try { monitors = Hyprland.monitors.values } catch (e) {}
+    for (var i = 0; i < monitors.length; i++) {
+      if (monitors[i] && monitors[i].activeWorkspace
+          && root.positiveWorkspaceId(monitors[i].activeWorkspace.id) === id)
+        return true
+    }
+    return false
+  }
+
+  function monitorNameForWorkspace(id) {
+    var workspace = root.workspaceById(id, root.workspaceRevision)
+    return workspace && workspace.monitor && workspace.monitor.name
+      ? String(workspace.monitor.name) : root.overviewMonitorName
+  }
+
+  // Follow Omarchy's per-monitor blocks. Keep five base slots, then include
+  // other owned slots and workspaces visiting this monitor from another block.
+  function workspaceEntriesForMonitor(revision) {
     var workspaces = []
     try { workspaces = Hyprland.workspaces.values } catch (e) {}
-    for (var workspaceIndex = 0; workspaceIndex < workspaces.length; workspaceIndex++) {
-      var workspace = workspaces[workspaceIndex]
-      var liveId = root.positiveWorkspaceId(workspace && workspace.id)
-      if (liveId <= root.minimumWorkspaceCount || ids.indexOf(liveId) !== -1)
-        continue
-      var occupied = false
-      try {
-        occupied = Boolean(workspace.toplevels
-          && workspace.toplevels.values.length > 0)
-      } catch (e) {}
-      if (workspace.active || occupied) ids.push(liveId)
-    }
-
-    for (var createdIndex = 0; createdIndex < root.createdWorkspaceIds.length; createdIndex++) {
-      var createdId = root.positiveWorkspaceId(root.createdWorkspaceIds[createdIndex])
-      if (createdId > root.minimumWorkspaceCount
-          && ids.indexOf(createdId) === -1)
-        ids.push(createdId)
-    }
-
-    ids.sort(function(left, right) { return left - right })
-    return ids
+    return WorkspaceModel.entries(workspaces, root.createdWorkspaceIds,
+      root.overviewWorkspaceBlock, root.overviewMonitorName,
+      root.minimumWorkspaceCount, root.workspacesPerMonitor)
   }
 
   function workspaceEntries(revision) {
-    var entries = []
-    var ids = root.workspaceIds(revision)
-    for (var i = 0; i < ids.length; i++)
-      entries.push({ addWorkspace: false, id: ids[i] })
-    entries.push({ addWorkspace: true, id: 0 })
+    var entries = root.workspaceEntriesForMonitor(revision)
+    var wasGuest = false
+    for (var i = 0; i < entries.length; i++) {
+      entries[i].firstGuest = Boolean(entries[i].guest && !wasGuest)
+      wasGuest = Boolean(entries[i].guest)
+    }
+    var workspaces = []
+    try { workspaces = Hyprland.workspaces.values } catch (e) {}
+    var nextId = WorkspaceModel.nextFreeId(workspaces,
+      root.createdWorkspaceIds, root.overviewWorkspaceBlock,
+      root.minimumWorkspaceCount, root.workspacesPerMonitor)
+    entries.push({ addWorkspace: true, id: 0, slot: -1,
+      guest: false, firstGuest: false, enabled: nextId > 0 })
     return entries
   }
 
@@ -390,9 +466,8 @@ Item {
     Qt.callLater(function() {
       if (!root.workspaceScroller) return
       var cardWidth = root.workspaceScroller.thumbnailWidth
-      var step = cardWidth + root.cardGap
       var left = root.workspaceScroller.cardsOffsetX
-        + Math.max(0, root.selectedIndex * step)
+        + root.workspaceCardOffset(root.selectedIndex, cardWidth)
       var right = left + cardWidth
       var viewLeft = root.workspaceScroller.contentX
       var viewRight = viewLeft + root.workspaceScroller.width
@@ -402,6 +477,17 @@ Item {
         root.workspaceScroller.contentX = Math.min(
           left, root.workspaceScroller.contentWidth - root.workspaceScroller.width)
     })
+  }
+
+  function workspaceCardOffset(index, cardWidth) {
+    var entries = root.workspaceEntries(root.workspaceRevision)
+    var width = Number(cardWidth) || root.workspaceThumbnailWidth
+    var offset = 0
+    for (var i = 0; i <= index && i < entries.length; i++) {
+      offset += entries[i].firstGuest ? Style.space(24) : 0
+      if (i < index) offset += width + root.cardGap
+    }
+    return offset
   }
 
   function workspaceWindowCount(workspace, revision) {
@@ -423,22 +509,66 @@ Item {
     return titles
   }
 
-  function focusedIndex() {
-    var focused = Hyprland.focusedWorkspace
-    var ids = root.workspaceIds(root.workspaceRevision)
-    if (!focused) return 0
-    var index = ids.indexOf(focused.id)
-    return index >= 0 ? index : 0
+  function selectionIndex() {
+    var entries = root.workspaceEntries(root.workspaceRevision)
+    for (var i = 0; i < entries.length; i++) {
+      if (root.selectedAddWorkspace && entries[i].addWorkspace) return i
+      if (!entries[i].addWorkspace
+          && Number(entries[i].id) === root.selectedWorkspaceId) return i
+    }
+    var activeId = root.activeWorkspaceId()
+    for (var activeIndex = 0; activeIndex < entries.length; activeIndex++) {
+      if (!entries[activeIndex].addWorkspace
+          && Number(entries[activeIndex].id) === activeId) return activeIndex
+    }
+    return 0
+  }
+
+  function setSelectedIndex(index) {
+    var entries = root.workspaceEntries(root.workspaceRevision)
+    if (entries.length <= 0) return
+    var selected = Math.max(0, Math.min(entries.length - 1, Number(index) || 0))
+    var entry = entries[selected]
+    root.selectedAddWorkspace = Boolean(entry.addWorkspace)
+    root.selectedWorkspaceId = entry.addWorkspace ? -1 : Number(entry.id)
+  }
+
+  function selectWorkspaceId(id, ensureVisible) {
+    var workspaceId = root.positiveWorkspaceId(id)
+    if (workspaceId < 1) return false
+    var entries = root.workspaceEntries(root.workspaceRevision)
+    for (var i = 0; i < entries.length; i++) {
+      if (!entries[i].addWorkspace && Number(entries[i].id) === workspaceId) {
+        root.selectedWorkspaceId = workspaceId
+        root.selectedAddWorkspace = false
+        if (ensureVisible !== false) root.ensureSelectionVisible()
+        return true
+      }
+    }
+    return false
+  }
+
+  function reconcileSelection() {
+    var entries = root.workspaceEntries(root.workspaceRevision)
+    for (var i = 0; i < entries.length; i++) {
+      if (root.selectedAddWorkspace && entries[i].addWorkspace) return
+      if (!entries[i].addWorkspace
+          && Number(entries[i].id) === root.selectedWorkspaceId) return
+    }
+    if (root.selectWorkspaceId(root.activeWorkspaceId(), false)) return
+    for (var next = 0; next < entries.length; next++) {
+      if (!entries[next].addWorkspace) {
+        root.selectedWorkspaceId = Number(entries[next].id)
+        root.selectedAddWorkspace = false
+        return
+      }
+    }
+    root.selectedWorkspaceId = -1
+    root.selectedAddWorkspace = entries.length > 0
   }
 
   function clampSelection() {
-    var count = root.workspaceEntries(root.workspaceRevision).length
-    if (count <= 0) {
-      root.selectedIndex = 0
-      return
-    }
-    if (root.selectedIndex < 0) root.selectedIndex = count - 1
-    if (root.selectedIndex >= count) root.selectedIndex = 0
+    root.reconcileSelection()
   }
 
   function cardAspectRatioFor(screen) {
@@ -466,7 +596,7 @@ Item {
   function select(delta) {
     var count = root.workspaceEntries(root.workspaceRevision).length
     if (count <= 0) return
-    root.selectedIndex = (root.selectedIndex + delta + count) % count
+    root.setSelectedIndex((root.selectedIndex + delta + count) % count)
     root.ensureSelectionVisible()
   }
 
@@ -478,7 +608,7 @@ Item {
           root.dragPreviewWorkspaceId = Number(entries[i].id)
         else {
           root.dragPreviewWorkspaceId = -1
-          root.selectedIndex = i
+          root.selectWorkspaceId(entries[i].id, false)
         }
         return
       }
@@ -493,7 +623,7 @@ Item {
       var entries = root.workspaceEntries(root.workspaceRevision)
       for (var i = 0; i < entries.length; i++) {
         if (!entries[i].addWorkspace && Number(entries[i].id) === workspaceId) {
-          root.selectedIndex = i
+          root.selectWorkspaceId(workspaceId, false)
           root.ensureSelectionVisible()
           return true
         }
@@ -511,24 +641,35 @@ Item {
     var entries = root.workspaceEntries(root.workspaceRevision)
     if (root.selectedIndex < 0 || root.selectedIndex >= entries.length) return
     var entry = entries[root.selectedIndex]
-    if (entry.addWorkspace) root.addWorkspace()
+    if (entry.addWorkspace) {
+      if (entry.enabled) root.addWorkspace()
+    }
     else root.focusWorkspace(entry.id)
   }
 
-  function dispatchFocusWorkspace(id) {
+  function dispatchFocusWorkspace(id, monitorName) {
     var workspaceId = root.positiveWorkspaceId(id)
     if (workspaceId < 1) return false
-    if (Hyprland.usingLua)
-      Hyprland.dispatch("hl.dsp.focus({ workspace = \"" + String(workspaceId) + "\" })")
-    else
+    var targetMonitorName = String(monitorName || root.overviewMonitorName)
+    var targetBlock = root.workspaceBlockForMonitor(targetMonitorName)
+    if (Hyprland.usingLua && WorkspaceModel.blockOf(workspaceId,
+        root.workspacesPerMonitor) === targetBlock) {
+      Hyprland.dispatch("o.workspaces.focus("
+        + WorkspaceModel.slotOf(workspaceId, root.workspacesPerMonitor)
+        + ", \"" + root.luaString(targetMonitorName) + "\")")
+    } else if (Hyprland.usingLua) {
+      Hyprland.dispatch("hl.dsp.focus({ workspace = \""
+        + String(workspaceId) + "\" })")
+    } else {
       Hyprland.dispatch("workspace " + String(workspaceId))
+    }
     return true
   }
 
-  function focusWorkspace(id) {
+  function focusWorkspace(id, monitorName) {
     root.closeWorkspaceContext()
     try {
-      if (!root.dispatchFocusWorkspace(id)) return
+      if (!root.dispatchFocusWorkspace(id, monitorName)) return
     } catch (e) {
       console.warn("workspace overview: could not focus workspace", id, e)
     }
@@ -542,8 +683,9 @@ Item {
     root.altTabOpen = false
     var workspace = toplevel && toplevel.workspace ? toplevel.workspace : null
     var workspaceId = workspace ? root.positiveWorkspaceId(workspace.id) : -1
-    var focusedWorkspaceId = Hyprland.focusedWorkspace
-      ? root.positiveWorkspaceId(Hyprland.focusedWorkspace.id) : -1
+    var focusedWorkspaceId = root.activeWorkspaceId()
+    var targetMonitorName = workspace && workspace.monitor && workspace.monitor.name
+      ? String(workspace.monitor.name) : root.overviewMonitorName
     var ipc = toplevel ? toplevel.lastIpcObject : null
     var at = ipc && ipc.at && ipc.at.length >= 2 ? ipc.at : null
     var size = ipc && ipc.size && ipc.size.length >= 2 ? ipc.size : null
@@ -555,7 +697,7 @@ Item {
     Qt.callLater(function() {
       try {
         if (workspaceId > 0 && workspaceId !== focusedWorkspaceId)
-          root.dispatchFocusWorkspace(workspaceId)
+          root.dispatchFocusWorkspace(workspaceId, targetMonitorName)
 
         if (Hyprland.usingLua) {
           Hyprland.dispatch("hl.dsp.focus({ window = \"address:" + address + "\" })")
@@ -973,13 +1115,15 @@ Item {
 
   function addWorkspace() {
     if (workspaceCreateProcess.running) return
-    var ids = root.workspaceIds(root.workspaceRevision)
-    var nextId = root.minimumWorkspaceCount
-    for (var i = 0; i < ids.length; i++)
-      nextId = Math.max(nextId, Number(ids[i]))
-    nextId += 1
+    var workspaces = []
+    try { workspaces = Hyprland.workspaces.values } catch (e) {}
+    var nextId = WorkspaceModel.nextFreeId(workspaces,
+      root.createdWorkspaceIds, root.overviewWorkspaceBlock,
+      root.minimumWorkspaceCount, root.workspacesPerMonitor)
+    if (nextId < 1) return
 
     root.pendingWorkspaceCreateId = nextId
+    root.pendingWorkspaceCreateMonitorName = root.overviewMonitorName
     workspaceCreateProcess.running = true
   }
 
@@ -991,9 +1135,11 @@ Item {
     root.workspaceRevision += 1
 
     try {
-      // Keep the overview open while creating the workspace so its thumbnail
-      // becomes visible immediately. The workspace is not followed here.
-      root.dispatchFocusWorkspace(id)
+      // Keep the overview open while creating the workspace, then focus the
+      // new local slot on the monitor where the request started.
+      root.dispatchFocusWorkspace(id, root.pendingWorkspaceCreateMonitorName)
+      root.pendingWorkspaceCreateMonitorName = ""
+      Hyprland.refreshMonitors()
       Hyprland.refreshWorkspaces()
       Hyprland.refreshToplevels()
     } catch (e) {
@@ -1001,7 +1147,7 @@ Item {
     }
 
     Qt.callLater(function() {
-      root.selectedIndex = root.workspaceEntries(root.workspaceRevision).length - 1
+      root.selectWorkspaceId(id, false)
       root.ensureSelectionVisible()
     })
   }
@@ -1950,7 +2096,7 @@ Item {
 
   function deleteWorkspace(id) {
     var workspaceId = root.positiveWorkspaceId(id)
-    if (workspaceId <= root.minimumWorkspaceCount) return
+    if (!root.isWorkspaceDeletable(workspaceId)) return
 
     var workspace = root.workspaceById(workspaceId, root.workspaceRevision)
     if (root.workspaceWindowCount(workspace, root.workspaceRevision) > 0) {
@@ -1962,10 +2108,11 @@ Item {
 
     // Hyprland cannot destroy the currently active workspace. Move to the
     // first default workspace and defer the destroy until its event arrives.
-    var focusedWorkspace = Hyprland.focusedWorkspace
-    if (focusedWorkspace
-        && root.positiveWorkspaceId(focusedWorkspace.id) === workspaceId) {
-      try { root.dispatchFocusWorkspace(1) } catch (e) {}
+    if (root.isWorkspaceActive(workspaceId)) {
+      var monitorName = root.monitorNameForWorkspace(workspaceId)
+      var block = root.workspaceBlockForMonitor(monitorName)
+      var fallbackId = block * root.workspacesPerMonitor + 1
+      try { root.dispatchFocusWorkspace(fallbackId, monitorName) } catch (e) {}
       pendingWorkspaceDelete.workspaceId = workspaceId
       pendingWorkspaceDelete.attempts = 0
       pendingWorkspaceDelete.restart()
@@ -1982,21 +2129,19 @@ Item {
     interval: 120
     repeat: false
     onTriggered: {
-      if (workspaceId <= root.minimumWorkspaceCount) {
+      if (!root.isWorkspaceDeletable(workspaceId)) {
         workspaceId = -1
         attempts = 0
         return
       }
 
-      var focused = Hyprland.focusedWorkspace
-      if (focused && root.positiveWorkspaceId(focused.id) === workspaceId
-          && attempts < 10) {
+      if (root.isWorkspaceActive(workspaceId) && attempts < 10) {
         attempts += 1
         restart()
         return
       }
 
-      if (focused && root.positiveWorkspaceId(focused.id) === workspaceId) {
+      if (root.isWorkspaceActive(workspaceId)) {
         console.warn("workspace overview: workspace remained active; refusing to delete", workspaceId)
         workspaceId = -1
         attempts = 0
@@ -2033,14 +2178,19 @@ Item {
     root.settingsMode = payload.mode === "settings"
     if (root.settingsMode)
       root.settingsSelection = 0
-    try { Hyprland.refreshWorkspaces(); Hyprland.refreshToplevels() } catch (e) {}
+    try {
+      Hyprland.refreshMonitors()
+      Hyprland.refreshWorkspaces()
+      Hyprland.refreshToplevels()
+    } catch (e) {}
     root.workspaceRevision += 1
     root.selectedToplevel = null
     root.showKeybindHint = false
-    root.selectedIndex = root.focusedIndex()
+    root.selectedWorkspaceId = root.activeWorkspaceId()
+    root.selectedAddWorkspace = false
     root.opened = true
     Qt.callLater(function() {
-      root.clampSelection()
+      root.reconcileSelection()
       root.ensureSelectionVisible()
     })
   }
@@ -2094,6 +2244,15 @@ Item {
     var monitor = null
     try { monitor = Hyprland.monitorFor(screen) } catch (e) {}
     return monitor && monitor.name === focusedMonitor.name
+  }
+
+  FileView {
+    path: root.monitorWorkspaceMapPath
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.readMonitorWorkspaceBlocks(text())
+    onLoadFailed: root.readMonitorWorkspaceBlocks("")
   }
 
   Timer {
@@ -2350,6 +2509,7 @@ Item {
       var workspaceId = root.pendingWorkspaceCreateId
       root.pendingWorkspaceCreateId = -1
       if (exitCode !== 0) {
+        root.pendingWorkspaceCreateMonitorName = ""
         console.warn("workspace overview: could not make workspace persistent",
           workspaceId, "hyprctl exited with", exitCode)
         return
@@ -2423,12 +2583,18 @@ Item {
       var workspaceChanged = name.indexOf("monitor") !== -1
         || name.indexOf("moveworkspace") === 0
         || name.indexOf("workspace") !== -1
+      var monitorChanged = name.indexOf("monitor") !== -1
+        || name === "moveworkspacev2" || name === "changeworkspaceid"
+      var focusedWorkspaceChanged = name === "workspacev2"
+        && root.overviewMonitor !== null && root.overviewMonitor.focused
       var toplevelChanged = name.indexOf("window") !== -1
         || name.indexOf("group") !== -1
         || name === "fullscreen"
         || name === "changefloatingmode"
         || name.indexOf("workspace") !== -1
 
+      if (monitorChanged || focusedWorkspaceChanged)
+        Hyprland.refreshMonitors()
       if (workspaceChanged)
         Hyprland.refreshWorkspaces()
       if (toplevelChanged)
@@ -2673,9 +2839,12 @@ Item {
               readonly property real thumbnailWidth: root.workspaceThumbnailWidth
               readonly property real thumbnailHeight: thumbnailWidth
                 / root.cardAspectRatioFor(panelScreen)
-              readonly property real cardsContentWidth: Math.max(0,
-                root.workspaceEntries(root.workspaceRevision).length
-                  * (thumbnailWidth + root.cardGap) - root.cardGap)
+              readonly property real cardsContentWidth: {
+                var entries = root.workspaceEntries(root.workspaceRevision)
+                return entries.length > 0
+                  ? root.workspaceCardOffset(entries.length - 1, thumbnailWidth)
+                    + thumbnailWidth : 0
+              }
               readonly property real cardsOffsetX: Math.max(0,
                 (width - cardsContentWidth) / 2)
               property real horizontalWheelAccumulator: 0
@@ -2691,12 +2860,19 @@ Item {
               maximumFlickVelocity: 8000
               flickDeceleration: 5000
               onMovementEnded: {
-                var step = thumbnailWidth + root.cardGap
-                if (step <= 0) return
                 var entries = root.workspaceEntries(root.workspaceRevision)
                 if (entries.length <= 0) return
-                root.selectedIndex = Math.max(0, Math.min(entries.length - 1,
-                  Math.round(contentX / step)))
+                var closestIndex = 0
+                var closestDistance = Infinity
+                for (var i = 0; i < entries.length; i++) {
+                  var distance = Math.abs(
+                    root.workspaceCardOffset(i, thumbnailWidth) - contentX)
+                  if (distance < closestDistance) {
+                    closestDistance = distance
+                    closestIndex = i
+                  }
+                }
+                root.setSelectedIndex(closestIndex)
                 root.ensureSelectionVisible()
               }
 
@@ -2742,13 +2918,15 @@ Item {
                   readonly property bool addCard: Boolean(modelData.addWorkspace)
                   readonly property int cardWorkspaceId: Number(modelData.id)
                   x: workspaceFlickable.cardsOffsetX
-                    + index * (workspaceFlickable.thumbnailWidth + root.cardGap)
+                    + root.workspaceCardOffset(index, workspaceFlickable.thumbnailWidth)
                   y: 0
                   width: workspaceFlickable.thumbnailWidth
                   height: workspaceFlickable.height
                   workspaceId: addCard ? 0 : cardWorkspaceId
                   addWorkspace: addCard
-                  deletable: !addCard && cardWorkspaceId > root.minimumWorkspaceCount
+                  addWorkspaceEnabled: !addCard || Boolean(modelData.enabled)
+                  workspaceLabel: addCard ? "" : root.workspaceLabel(cardWorkspaceId)
+                  deletable: !addCard && root.isWorkspaceDeletable(cardWorkspaceId)
                   activateOnClick: false
                   selectOnHover: true
                   workspace: addCard ? null
@@ -2758,12 +2936,12 @@ Item {
                     cardWorkspaceId)
                   previewScreen: panelScreen
                   contextTarget: keyCatcher
-                  focused: !addCard && Hyprland.focusedWorkspace !== null
-                    && Hyprland.focusedWorkspace.id === cardWorkspaceId
+                  focused: !addCard && root.activeWorkspaceId() === cardWorkspaceId
                   keyboardSelected: root.draggedToplevel
                     && root.dragPreviewWorkspaceId > 0
                     ? (!addCard && root.dragPreviewWorkspaceId === cardWorkspaceId)
-                    : root.selectedIndex === index
+                    : (addCard ? root.selectedAddWorkspace
+                      : root.selectedWorkspaceId === cardWorkspaceId)
                   draggedToplevel: root.draggedToplevel
                   freezeDraggedPreview: root.dragPreviewFrozen
                   draggedSourceWorkspaceIdOverride: root.dragStartState
@@ -2788,7 +2966,7 @@ Item {
                   onWorkspaceHovered: root.selectWorkspacePreview(cardWorkspaceId)
                   onWorkspaceActivated: {
                     if (addCard) root.addWorkspace()
-                    else root.selectedIndex = index
+                    else root.selectWorkspaceId(cardWorkspaceId)
                   }
                   onWorkspaceContextRequested: function(x, y) {
                     root.openWorkspaceContext(cardWorkspaceId, x, y)
@@ -2876,7 +3054,11 @@ Item {
                   : selectedWorkspaceArea.canvasWorkspaceId
                 addWorkspace: selectedWorkspaceArea.canvasAddCard
                 deletable: !selectedWorkspaceArea.canvasAddCard
-                  && selectedWorkspaceArea.canvasWorkspaceId > root.minimumWorkspaceCount
+                  && root.isWorkspaceDeletable(selectedWorkspaceArea.canvasWorkspaceId)
+                workspaceLabel: selectedWorkspaceArea.canvasAddCard ? ""
+                  : root.workspaceLabel(selectedWorkspaceArea.canvasWorkspaceId)
+                addWorkspaceEnabled: !selectedWorkspaceArea.canvasAddCard
+                  || Boolean(selectedWorkspaceArea.selectedEntry.enabled)
                 workspace: selectedWorkspaceArea.canvasAddCard ? null
                   : root.workspaceById(selectedWorkspaceArea.canvasWorkspaceId,
                     root.workspaceRevision)
@@ -2887,8 +3069,7 @@ Item {
                 previewScreen: panelScreen
                 contextTarget: keyCatcher
                 focused: !selectedWorkspaceArea.canvasAddCard
-                  && Hyprland.focusedWorkspace !== null
-                  && Hyprland.focusedWorkspace.id === selectedWorkspaceArea.canvasWorkspaceId
+                  && root.activeWorkspaceId() === selectedWorkspaceArea.canvasWorkspaceId
                 keyboardSelected: true
                 draggedToplevel: root.draggedToplevel
                 freezeDraggedPreview: root.dragPreviewFrozen
@@ -2968,8 +3149,10 @@ Item {
                 showSelectionFill: false
                 workspaceId: selectedWorkspaceArea.previewWorkspaceId
                 addWorkspace: false
-                deletable: selectedWorkspaceArea.previewWorkspaceId
-                  > root.minimumWorkspaceCount
+                deletable: root.isWorkspaceDeletable(
+                  selectedWorkspaceArea.previewWorkspaceId)
+                workspaceLabel: root.workspaceLabel(
+                  selectedWorkspaceArea.previewWorkspaceId)
                 workspace: root.workspaceById(
                   selectedWorkspaceArea.previewWorkspaceId, root.workspaceRevision)
                 workspaceName: root.workspaceName(
@@ -2977,8 +3160,8 @@ Item {
                     root.workspaceRevision), selectedWorkspaceArea.previewWorkspaceId)
                 previewScreen: panelScreen
                 contextTarget: keyCatcher
-                focused: Hyprland.focusedWorkspace !== null
-                  && Hyprland.focusedWorkspace.id === selectedWorkspaceArea.previewWorkspaceId
+                focused: root.activeWorkspaceId()
+                  === selectedWorkspaceArea.previewWorkspaceId
                 keyboardSelected: true
                 activateOnClick: false
                 selectOnHover: false
@@ -3287,9 +3470,10 @@ Item {
                 Layout.preferredHeight: root.contextRenameMode ? 0 : Style.space(38)
                 visible: !root.contextRenameMode
                 radius: Style.cornerRadius
-                color: deleteWorkspaceMouse.containsMouse && root.contextWorkspaceId > root.minimumWorkspaceCount
+                color: deleteWorkspaceMouse.containsMouse
+                    && root.isWorkspaceDeletable(root.contextWorkspaceId)
                   ? Util.alpha(Color.urgent, 0.20) : "transparent"
-                opacity: root.contextWorkspaceId > root.minimumWorkspaceCount
+                opacity: root.isWorkspaceDeletable(root.contextWorkspaceId)
                   && root.workspaceWindowCount(root.contextWorkspace(), root.workspaceRevision) === 0
                   ? 1 : 0.42
 
@@ -3297,7 +3481,7 @@ Item {
                   anchors.fill: parent
                   anchors.leftMargin: Style.space(10)
                   text: "Delete empty workspace"
-                  color: root.contextWorkspaceId > root.minimumWorkspaceCount
+                  color: root.isWorkspaceDeletable(root.contextWorkspaceId)
                     ? Color.menu.text : Util.alpha(Color.menu.text, 0.58)
                   font.family: Style.font.family
                   font.pixelSize: Style.font.body
@@ -3307,7 +3491,7 @@ Item {
                 MouseArea {
                   id: deleteWorkspaceMouse
                   anchors.fill: parent
-                  enabled: root.contextWorkspaceId > root.minimumWorkspaceCount
+                  enabled: root.isWorkspaceDeletable(root.contextWorkspaceId)
                     && root.workspaceWindowCount(root.contextWorkspace(), root.workspaceRevision) === 0
                   hoverEnabled: true
                   onClicked: root.deleteWorkspace(root.contextWorkspaceId)

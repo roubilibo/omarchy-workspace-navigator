@@ -10,6 +10,7 @@ BorderSurface {
   id: root
 
   required property int workspaceId
+  property string workspaceLabel: ""
   property var workspace: null
   property string workspaceName: ""
   property var previewScreen: null
@@ -19,6 +20,7 @@ BorderSurface {
   property bool showBackground: true
   property bool showSelectionFill: true
   property bool addWorkspace: false
+  property bool addWorkspaceEnabled: true
   property bool deletable: false
   property bool keyboardSelected: false
   property bool activateOnClick: true
@@ -139,7 +141,7 @@ BorderSurface {
   color: root.showBackground
     ? (root.occupied || root.focused
       ? Color.menu.background : (root.addWorkspace
-        ? Util.alpha(Color.accent, 0.10)
+        ? Util.alpha(Color.accent, root.addWorkspaceEnabled ? 0.10 : 0.04)
         : Util.alpha(Color.menu.background, 0.90)))
     : "transparent"
   borderSpec: root.showBorder ? root.cardBorderSpec : Border.none()
@@ -151,6 +153,7 @@ BorderSurface {
   MouseArea {
     anchors.fill: parent
     z: 1
+    enabled: !root.addWorkspace || root.addWorkspaceEnabled
     acceptedButtons: root.addWorkspace
       ? (Qt.LeftButton | Qt.RightButton) : (Qt.LeftButton | Qt.RightButton)
     hoverEnabled: true
@@ -363,7 +366,8 @@ BorderSurface {
     Text {
       id: badgeLabel
       anchors.centerIn: parent
-      text: String(root.workspaceId)
+      text: root.workspaceLabel !== ""
+        ? root.workspaceLabel : String(root.workspaceId)
       color: root.focused ? Color.menu.scrim : Color.menu.text
       opacity: root.focused || root.occupied || root.keyboardSelected ? 0.92 : 0.58
       font.family: Style.font.menuFamily
@@ -416,7 +420,8 @@ BorderSurface {
     anchors.centerIn: parent
     z: 10
     text: "+"
-    color: Color.accent
+    color: root.addWorkspaceEnabled ? Color.accent
+      : Util.alpha(Color.accent, 0.45)
     font.family: Style.font.menuFamily
     font.pixelSize: Style.font.displayLarge
     font.bold: true
@@ -429,7 +434,7 @@ BorderSurface {
     anchors.bottomMargin: Style.space(24)
     z: 10
     text: "Add workspace"
-    color: Util.alpha(Color.menu.text, 0.72)
+    color: Util.alpha(Color.menu.text, root.addWorkspaceEnabled ? 0.72 : 0.40)
     font.family: Style.font.menuFamily
     font.pixelSize: Style.font.bodySmall
   }

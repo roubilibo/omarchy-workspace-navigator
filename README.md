@@ -14,7 +14,8 @@ https://github.com/user-attachments/assets/0df6a9ee-ff00-40c7-9eb1-ff119a4b6a82
 ## Features
 
 - Mission Control overview with a horizontal workspace strip and one large preview of the selected workspace.
-- The strip starts with five workspaces; use `Add workspace` to show more. Workspace previews update live while the overview is open.
+- The strip follows Omarchy's per-monitor workspace blocks and local slot numbers. It starts with five slots; use `Add workspace` to add slots up to ten. Workspaces visiting from another block appear after a gap.
+- Workspace previews update live while the overview is open.
 - Live thumbnails showing each window's layout.
 - Left-click a workspace to enter it.
 - Left-click a window thumbnail to focus it.
