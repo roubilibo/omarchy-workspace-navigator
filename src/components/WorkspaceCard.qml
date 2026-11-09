@@ -213,6 +213,7 @@ BorderSurface {
     anchors.topMargin: Style.space(11)
     width: Math.max(1, root.width - badge.width - Style.space(46))
     text: root.workspaceName
+    textFormat: Text.PlainText
     color: root.focused ? Color.menu.text : Util.alpha(Color.menu.text, 0.82)
     font.family: Style.font.menuFamily
     font.pixelSize: Style.font.bodySmall

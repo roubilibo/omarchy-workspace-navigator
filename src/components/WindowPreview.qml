@@ -4,6 +4,7 @@ import Quickshell
 import Quickshell.Wayland
 import qs.Commons
 import "../lib/WindowModel.js" as WindowModel
+import "../lib/WindowGeometry.js" as WindowGeometry
 
 // A compositor-backed thumbnail. The tiny Drag source is deliberate: it lets
 // a DragHandler keep the thumbnail in place while DropArea receives the drag.
@@ -16,6 +17,7 @@ Rectangle {
   property var draggedToplevel: null
   property int draggedSourceWorkspaceIdOverride: -1
   property bool freezeDraggedPreview: false
+  property bool dragSnapshotFrozen: false
   property Item homeParent: null
   property Item dragOverlay: null
   property real dragShrinkProgress: 0
@@ -402,7 +404,15 @@ Rectangle {
           previewDrag.centroid.pressPosition.x / Math.max(1, root.width)))
         root.dragGrabRatioY = Math.max(0, Math.min(1,
           previewDrag.centroid.pressPosition.y / Math.max(1, root.height)))
+        root.dragSnapshotFrozen = false
         dragProxy.dragSessionActive = true
+        dragVisual.scheduleUpdate()
+        Qt.callLater(function() {
+          if (root.dragging) {
+            dragVisual.scheduleUpdate()
+            root.dragSnapshotFrozen = true
+          }
+        })
         root.reportDragDiagnostic("handler-active", {
           active: true,
           pointer: [previewDrag.centroid.position.x, previewDrag.centroid.position.y],
@@ -421,6 +431,7 @@ Rectangle {
         })
         dragProxy.Drag.drop()
         dragProxy.dragSessionActive = false
+        root.dragSnapshotFrozen = false
         root.dragFinished(root.toplevel)
       }
     }
@@ -487,16 +498,12 @@ Rectangle {
   ShaderEffectSource {
     id: dragVisual
     parent: root.dragOverlay
-    readonly property real fittedTargetScale: Math.max(0.01, Math.min(1,
-      Math.min(root.dragTargetWidth / Math.max(1, root.width),
-        root.dragTargetHeight / Math.max(1, root.height))))
-    // Interpolate uniformly to the largest size that fits the strip card, so
-    // the window keeps its own aspect ratio and ends at thumbnail scale.
-    readonly property real targetScale: 1
-      - (1 - fittedTargetScale)
-        * Math.max(0, Math.min(1, root.dragShrinkProgress))
-    width: root.dragging ? root.width * targetScale : root.width
-    height: root.dragging ? root.height * targetScale : root.height
+    readonly property var dragGeometry: WindowGeometry.dragPreviewGeometry(
+      root.dragStartWidth, root.dragStartHeight,
+      root.dragTargetWidth, root.dragTargetHeight, root.dragShrinkProgress)
+    property real renderedScale: root.dragging ? dragGeometry.scale : 1
+    width: root.dragging ? root.dragStartWidth * renderedScale : root.width
+    height: root.dragging ? root.dragStartHeight * renderedScale : root.height
     x: root.dragging
       ? root.dragStartX + root.dragTranslationX
         + (root.dragStartWidth - width) * root.visualGrabRatioX : 0
@@ -506,13 +513,10 @@ Rectangle {
     z: 1000000
     visible: root.dragging && root.dragOverlay !== null
     sourceItem: root
-    live: root.dragging && !root.freezeDraggedPreview
+    live: root.dragging && !root.freezeDraggedPreview && !root.dragSnapshotFrozen
     hideSource: root.dragging
 
-    Behavior on width {
-      NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
-    }
-    Behavior on height {
+    Behavior on renderedScale {
       NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
     }
   }
@@ -523,9 +527,8 @@ Rectangle {
   Rectangle {
     id: dragVisualBorder
     parent: root.dragOverlay
-    readonly property real renderedScale: Math.max(0.01, Math.min(
-      width / Math.max(1, root.width),
-      height / Math.max(1, root.height)))
+    readonly property real renderedScale: root.dragging
+      ? dragVisual.width / Math.max(1, root.dragStartWidth) : 1
     x: dragVisual.x
     y: dragVisual.y
     width: dragVisual.width

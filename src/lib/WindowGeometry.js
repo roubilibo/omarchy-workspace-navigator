@@ -9,6 +9,29 @@ function clamp(value, minimum, maximum) {
   return Math.max(minimum, Math.min(value, maximum))
 }
 
+function dragPreviewGeometry(startWidth, startHeight, targetWidth, targetHeight,
+                             progress) {
+  var width = finiteNumber(startWidth)
+  var height = finiteNumber(startHeight)
+  if (!isFinite(width) || width <= 0) width = 1
+  if (!isFinite(height) || height <= 0) height = 1
+
+  var targetScale = 1
+  var safeTargetWidth = finiteNumber(targetWidth)
+  var safeTargetHeight = finiteNumber(targetHeight)
+  if (isFinite(safeTargetWidth) && safeTargetWidth > 0
+      && isFinite(safeTargetHeight) && safeTargetHeight > 0) {
+    targetScale = Math.min(1, safeTargetWidth / width,
+      safeTargetHeight / height)
+  }
+
+  var amount = finiteNumber(progress)
+  if (!isFinite(amount)) amount = 0
+  amount = clamp(amount, 0, 1)
+  var scale = 1 - (1 - targetScale) * amount
+  return { width: width * scale, height: height * scale, scale: scale }
+}
+
 function insetGeometry(width, height, requestedInset) {
   var safeWidth = Math.max(1, finiteNumber(width) || 1)
   var safeHeight = Math.max(1, finiteNumber(height) || 1)

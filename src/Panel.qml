@@ -495,20 +495,6 @@ Item {
     try { return workspace.toplevels.values.length } catch (e) { return 0 }
   }
 
-  function workspaceWindowTitles(workspace, revision) {
-    var titles = []
-    if (!workspace || !workspace.toplevels) return titles
-
-    try {
-      var values = workspace.toplevels.values
-      for (var i = 0; i < values.length; i++) {
-        var title = String(values[i].title || "").trim()
-        if (title !== "") titles.push(title)
-      }
-    } catch (e) {}
-    return titles
-  }
-
   function selectionIndex() {
     var entries = root.workspaceEntries(root.workspaceRevision)
     for (var i = 0; i < entries.length; i++) {
@@ -876,10 +862,6 @@ Item {
     }
     return WindowModel.sortAltTabByRecency(result,
       root.normalizedAddress(Hyprland.activeToplevel), root.altTabFocusHistory)
-  }
-
-  function refreshAltTabCandidates() {
-    root.altTabCandidates = root.altTabWindowList()
   }
 
   function reconcileAltTabCandidates() {
@@ -3244,318 +3226,31 @@ Item {
             onDismissRequested: root.dismiss()
           }
 
-          Rectangle {
-            id: workspaceContextMenu
+          WorkspaceContextMenu {
             visible: root.workspaceContextOpen
-            z: 100
-            width: Style.space(320)
-            height: contextMenuColumn.implicitHeight + Style.space(24)
-            x: Math.max(Style.space(24), Math.min(root.contextMenuX,
-              parent.width - width - Style.space(24)))
-            y: Math.max(Style.space(24), Math.min(root.contextMenuY,
-              parent.height - height - Style.space(24)))
-            radius: Style.cornerRadius
-            color: Color.menu.background
-            border.width: 1
-            border.color: Util.alpha(Color.menu.border, 0.58)
-
-            // Keep clicks inside the menu from reaching the overview scrim.
-            MouseArea {
-              anchors.fill: parent
-              acceptedButtons: Qt.AllButtons
-              onClicked: mouse.accepted = true
-            }
-
-            ColumnLayout {
-              id: contextMenuColumn
-              anchors.fill: parent
-              anchors.margins: Style.space(12)
-              spacing: Style.space(6)
-
-              Text {
-                Layout.fillWidth: true
-                text: {
-                  var workspace = root.contextWorkspace()
-                  var name = root.workspaceName(workspace, root.contextWorkspaceId)
-                  return name === "" ? "WS " + String(root.contextWorkspaceId)
-                    : name
-                }
-                color: Color.menu.text
-                font.family: Style.font.family
-                font.pixelSize: Style.font.body
-                font.bold: true
-                elide: Text.ElideRight
-              }
-
-              Text {
-                Layout.fillWidth: true
-                text: "Workspace actions"
-                color: Util.alpha(Color.menu.text, 0.54)
-                font.family: Style.font.family
-                font.pixelSize: Style.font.bodySmall
-              }
-
-              Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: root.contextRenameMode ? Style.space(38) : 0
-                visible: root.contextRenameMode
-                radius: Style.cornerRadius
-                color: Util.alpha(Color.menu.text, 0.07)
-                border.width: 1
-                border.color: Color.accent
-
-                TextInput {
-                  id: workspaceRenameInput
-                  anchors.fill: parent
-                  anchors.leftMargin: Style.space(10)
-                  anchors.rightMargin: Style.space(10)
-                  text: root.contextRenameText
-                  onTextEdited: root.contextRenameText = text
-                  color: Color.menu.text
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.body
-                  verticalAlignment: TextInput.AlignVCenter
-                  selectByMouse: true
-                  clip: true
-                  onVisibleChanged: {
-                    if (visible) Qt.callLater(function() {
-                      workspaceRenameInput.forceActiveFocus()
-                      workspaceRenameInput.selectAll()
-                    })
-                  }
-                  Keys.onReturnPressed: root.commitWorkspaceRename()
-                  Keys.onEscapePressed: root.cancelWorkspaceRename()
-                }
-              }
-
-              Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: root.contextRenameMode ? 0 : Style.space(38)
-                visible: !root.contextRenameMode
-                radius: Style.cornerRadius
-                color: focusWorkspaceMouse.containsMouse
-                  ? Util.alpha(Color.accent, 0.20) : "transparent"
-
-                Text {
-                  anchors.fill: parent
-                  anchors.leftMargin: Style.space(10)
-                  text: "Focus workspace"
-                  color: Color.menu.text
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.body
-                  verticalAlignment: Text.AlignVCenter
-                }
-
-                Text {
-                  anchors.right: parent.right
-                  anchors.rightMargin: Style.space(10)
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: "Enter"
-                  color: Util.alpha(Color.menu.text, 0.48)
-                  font.family: Style.font.menuFamily
-                  font.pixelSize: Style.font.bodySmall
-                }
-
-                MouseArea {
-                  id: focusWorkspaceMouse
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  onClicked: root.focusWorkspace(root.contextWorkspaceId)
-                }
-              }
-
-              Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: root.contextRenameMode ? 0 : Style.space(38)
-                visible: !root.contextRenameMode
-                radius: Style.cornerRadius
-                color: renameWorkspaceMouse.containsMouse
-                  ? Util.alpha(Color.accent, 0.20) : "transparent"
-
-                Text {
-                  anchors.fill: parent
-                  anchors.leftMargin: Style.space(10)
-                  text: "Rename workspace"
-                  color: Color.menu.text
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.body
-                  verticalAlignment: Text.AlignVCenter
-                }
-
-                Text {
-                  anchors.right: parent.right
-                  anchors.rightMargin: Style.space(10)
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: "R"
-                  color: Util.alpha(Color.menu.text, 0.48)
-                  font.family: Style.font.menuFamily
-                  font.pixelSize: Style.font.bodySmall
-                }
-
-                MouseArea {
-                  id: renameWorkspaceMouse
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  onClicked: root.beginWorkspaceRename()
-                }
-              }
-
-              Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: root.contextRenameMode ? 0 : Style.space(38)
-                visible: !root.contextRenameMode
-                radius: Style.cornerRadius
-                color: moveWindowMouse.containsMouse && root.contextCanMoveSelectedWindow()
-                  ? Util.alpha(Color.accent, 0.20) : "transparent"
-                opacity: root.contextCanMoveSelectedWindow() ? 1 : 0.45
-
-                Text {
-                  anchors.fill: parent
-                  anchors.leftMargin: Style.space(10)
-                  text: "Move selected window here"
-                  color: Color.menu.text
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.body
-                  verticalAlignment: Text.AlignVCenter
-                }
-
-                Text {
-                  anchors.right: parent.right
-                  anchors.rightMargin: Style.space(10)
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: "M"
-                  color: Util.alpha(Color.menu.text, 0.48)
-                  font.family: Style.font.menuFamily
-                  font.pixelSize: Style.font.bodySmall
-                }
-
-                MouseArea {
-                  id: moveWindowMouse
-                  anchors.fill: parent
-                  enabled: root.contextCanMoveSelectedWindow()
-                  hoverEnabled: true
-                  onClicked: root.moveSelectedWindowToContext()
-                }
-              }
-
-              Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: root.contextRenameMode ? 0 : Style.space(38)
-                visible: !root.contextRenameMode
-                radius: Style.cornerRadius
-                color: persistentWorkspaceMouse.containsMouse
-                  ? Util.alpha(Color.accent, 0.20) : "transparent"
-
-                Text {
-                  anchors.fill: parent
-                  anchors.leftMargin: Style.space(10)
-                  text: root.isMenuPersistentWorkspace(root.contextWorkspaceId)
-                    ? "Remove persistence" : "Make persistent"
-                  color: Color.menu.text
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.body
-                  verticalAlignment: Text.AlignVCenter
-                }
-
-                MouseArea {
-                  id: persistentWorkspaceMouse
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  onClicked: root.toggleWorkspacePersistence()
-                }
-              }
-
-              Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: root.contextRenameMode ? 0 : Style.space(38)
-                visible: !root.contextRenameMode
-                radius: Style.cornerRadius
-                color: deleteWorkspaceMouse.containsMouse
-                    && root.isWorkspaceDeletable(root.contextWorkspaceId)
-                  ? Util.alpha(Color.urgent, 0.20) : "transparent"
-                opacity: root.isWorkspaceDeletable(root.contextWorkspaceId)
-                  && root.workspaceWindowCount(root.contextWorkspace(), root.workspaceRevision) === 0
-                  ? 1 : 0.42
-
-                Text {
-                  anchors.fill: parent
-                  anchors.leftMargin: Style.space(10)
-                  text: "Delete empty workspace"
-                  color: root.isWorkspaceDeletable(root.contextWorkspaceId)
-                    ? Color.menu.text : Util.alpha(Color.menu.text, 0.58)
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.body
-                  verticalAlignment: Text.AlignVCenter
-                }
-
-                MouseArea {
-                  id: deleteWorkspaceMouse
-                  anchors.fill: parent
-                  enabled: root.isWorkspaceDeletable(root.contextWorkspaceId)
-                    && root.workspaceWindowCount(root.contextWorkspace(), root.workspaceRevision) === 0
-                  hoverEnabled: true
-                  onClicked: root.deleteWorkspace(root.contextWorkspaceId)
-                }
-              }
-
-              RowLayout {
-                visible: root.contextRenameMode
-                Layout.fillWidth: true
-                Layout.preferredHeight: Style.space(38)
-                spacing: Style.space(6)
-
-                Rectangle {
-                  Layout.fillWidth: true
-                  Layout.fillHeight: true
-                  radius: Style.cornerRadius
-                  color: cancelRenameMouse.containsMouse
-                    ? Util.alpha(Color.menu.text, 0.10) : "transparent"
-
-                  Text {
-                    anchors.fill: parent
-                    text: "Cancel"
-                    color: Color.menu.text
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.body
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                  }
-
-                  MouseArea {
-                    id: cancelRenameMouse
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    onClicked: root.cancelWorkspaceRename()
-                  }
-                }
-
-                Rectangle {
-                  Layout.fillWidth: true
-                  Layout.fillHeight: true
-                  radius: Style.cornerRadius
-                  color: saveRenameMouse.containsMouse
-                    ? Util.alpha(Color.accent, 0.34) : Util.alpha(Color.accent, 0.22)
-
-                  Text {
-                    anchors.fill: parent
-                    text: "Save"
-                    color: Color.menu.text
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.body
-                    horizontalAlignment: Text.AlignHCenter
-                    verticalAlignment: Text.AlignVCenter
-                  }
-
-                  MouseArea {
-                    id: saveRenameMouse
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    onClicked: root.commitWorkspaceRename()
-                  }
-                }
-              }
-            }
+            workspaceId: root.contextWorkspaceId
+            workspaceName: root.workspaceName(
+              root.contextWorkspace(), root.contextWorkspaceId)
+            menuX: root.contextMenuX
+            menuY: root.contextMenuY
+            renameMode: root.contextRenameMode
+            renameText: root.contextRenameText
+            canMoveSelectedWindow: root.contextCanMoveSelectedWindow()
+            persistent: root.isMenuPersistentWorkspace(root.contextWorkspaceId)
+            deletable: root.isWorkspaceDeletable(root.contextWorkspaceId)
+            deleteEnabled: root.isWorkspaceDeletable(root.contextWorkspaceId)
+              && root.workspaceWindowCount(
+                root.contextWorkspace(), root.workspaceRevision) === 0
+            onFocusRequested: root.focusWorkspace(root.contextWorkspaceId)
+            onRenameRequested: root.beginWorkspaceRename()
+            onRenameTextEdited: function(text) { root.contextRenameText = text }
+            onRenameCommitted: root.commitWorkspaceRename()
+            onRenameCancelled: root.cancelWorkspaceRename()
+            onMoveSelectedWindowRequested: root.moveSelectedWindowToContext()
+            onPersistenceToggled: root.toggleWorkspacePersistence()
+            onDeleteRequested: root.deleteWorkspace(root.contextWorkspaceId)
           }
+
         }
 
         Item {
