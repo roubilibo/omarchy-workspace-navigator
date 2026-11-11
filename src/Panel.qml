@@ -155,6 +155,9 @@ Item {
   readonly property string safeConfigFileHelper:
     Quickshell.env("HOME")
     + "/.config/omarchy/plugins/roubilibo.workspace-navigator/bin/safe-config-file.py"
+  readonly property string boundedHyprctlClientsHelper:
+    Quickshell.env("HOME")
+    + "/.config/omarchy/plugins/roubilibo.workspace-navigator/bin/bounded-hyprctl-clients.py"
   readonly property string hyprBindingsPath:
     Quickshell.env("HOME") + "/.config/hypr/bindings.lua"
   property string settingsWriteText: ""
@@ -2365,7 +2368,7 @@ Item {
 
   Process {
     id: dragStateProbe
-    command: ["hyprctl", "clients", "-j"]
+    command: ["python3", root.boundedHyprctlClientsHelper]
     stdout: StdioCollector {
       id: dragStateProbeOutput
       waitForEnd: true
@@ -2389,7 +2392,7 @@ Item {
 
   Process {
     id: tiledSwapStateProbe
-    command: ["hyprctl", "clients", "-j"]
+    command: ["python3", root.boundedHyprctlClientsHelper]
     stdout: StdioCollector {
       id: tiledSwapStateProbeOutput
       waitForEnd: true
