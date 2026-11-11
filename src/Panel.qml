@@ -141,6 +141,9 @@ Item {
   ]
   readonly property string settingsPath:
     Quickshell.env("HOME") + "/.local/state/omarchy/settings/workspace-navigator.json"
+  readonly property string currentWallpaperLink:
+    Quickshell.env("HOME") + "/.local/state/omarchy/current/background"
+  property string destinationPreviewWallpaperPath: ""
   readonly property string monitorWorkspaceMapPath:
     (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state")
     + "/omarchy/monitor-workspaces"
@@ -209,6 +212,11 @@ Item {
     }, null, 2) + "\n"
     root.settingsWriteDirty = true
     if (!settingsWriteProcess.running) root.startSettingsWrite()
+  }
+
+  function refreshDestinationPreviewWallpaper() {
+    if (!destinationPreviewWallpaperProcess.running)
+      destinationPreviewWallpaperProcess.running = true
   }
 
   function startSettingsWrite() {
@@ -2331,13 +2339,27 @@ Item {
     interval: 180
     repeat: false
     onTriggered: {
-      try { Hyprland.refreshToplevels() } catch (e) {}
+      try { Hyprland.refreshWorkspaces(); Hyprland.refreshToplevels() } catch (e) {}
       root.workspaceRevision += 1
       Qt.callLater(function() {
         root.dragGeometryOverrides = ({})
         root.dragGeometryRevision += 1
         root.dragWorkspaceToplevelSnapshots = null
       })
+    }
+  }
+
+  Process {
+    id: destinationPreviewWallpaperProcess
+    command: ["readlink", "-f", root.currentWallpaperLink]
+    stdout: StdioCollector {
+      id: destinationPreviewWallpaperOutput
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      var path = String(destinationPreviewWallpaperOutput.text || "").trim()
+      root.destinationPreviewWallpaperPath = exitCode === 0
+        && path.length > 0 && path.length <= 4096 ? path : ""
     }
   }
 
@@ -2641,9 +2663,32 @@ Item {
         Rectangle {
           anchors.fill: parent
           visible: root.opened && !root.settingsMode && !root.altTabOpen
+            && selectedWorkspaceArea.showingDragPreview
+          // Empty workspaces have no captured windows to cover the active
+          // desktop, so use Omarchy's wallpaper as the drag-preview backdrop.
+          color: Color.menu.background
+
+          Image {
+            anchors.fill: parent
+            visible: status === Image.Ready
+            source: root.destinationPreviewWallpaperPath !== ""
+              ? Util.fileUrl(root.destinationPreviewWallpaperPath) : ""
+            sourceSize.width: Math.ceil(width * panelScreen.devicePixelRatio)
+            sourceSize.height: Math.ceil(height * panelScreen.devicePixelRatio)
+            fillMode: Image.PreserveAspectCrop
+            asynchronous: true
+            smooth: true
+            mipmap: true
+          }
+        }
+
+        Rectangle {
+          anchors.fill: parent
+          visible: root.opened && !root.settingsMode && !root.altTabOpen
           // Use Omarchy's menu scrim so the overview follows the active theme
-          // and keeps a consistent amount of desktop context visible.
-          color: Color.menu.scrim
+          // while the hovered destination preview supplies its own backdrop.
+          color: selectedWorkspaceArea.showingDragPreview
+            ? "transparent" : Color.menu.scrim
 
           MouseArea {
             anchors.fill: parent
@@ -3024,6 +3069,11 @@ Item {
                 root.draggedToplevel !== null && previewWorkspaceId > 0
                   && previewWorkspaceId !== canvasWorkspaceId
 
+              onShowingDragPreviewChanged: {
+                if (showingDragPreview)
+                  root.refreshDestinationPreviewWallpaper()
+              }
+
               // This card retains the original drag source and hides its
               // sibling thumbnails while another workspace is being previewed.
               WorkspaceCard {
@@ -3032,6 +3082,7 @@ Item {
                 showBackground: false
                 showSelectionFill: false
                 keepDraggedPreviewOnly: selectedWorkspaceArea.retainingDragSourceCanvas
+                  || selectedWorkspaceArea.showingDragPreview
                 workspaceId: selectedWorkspaceArea.canvasAddCard ? 0
                   : selectedWorkspaceArea.canvasWorkspaceId
                 addWorkspace: selectedWorkspaceArea.canvasAddCard
